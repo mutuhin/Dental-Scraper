@@ -74,4 +74,5 @@ jobs:
         with:
           name: batch-${{ github.event.inputs.batch }}
           path: batch_*.xlsx
-          retention-days: 30    # file stays available for 30 days
+          retention-days: 30
+          overwrite: true
