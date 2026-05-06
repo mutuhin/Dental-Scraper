@@ -1,0 +1,77 @@
+name: Dental Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Batch number  (1 = rows 1-100 | 2 = rows 101-200 | 3 = rows 201-300 …)'
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
+          - '9'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '20'
+          - '30'
+          - '40'
+          - '50'
+          - '60'
+        default: '1'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330        # 5.5 hours — 100 practices × ~3 min each
+
+    steps:
+      # ── 1. Checkout your repo ──────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Install Python packages ────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            requests \
+            beautifulsoup4 \
+            openpyxl \
+            lxml \
+            curl-cffi \
+            playwright \
+            python-dateutil
+
+      # ── 4. Install Playwright browser + system deps ───────────────────────
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
+
+      # ── 5. Run the batch ──────────────────────────────────────────────────
+      - name: Run scraper batch ${{ github.event.inputs.batch }}
+        run: python run_batch.py ${{ github.event.inputs.batch }}
+
+      # ── 6. Upload xlsx as downloadable artifact ───────────────────────────
+      - name: Upload scraped output
+        if: always()            # upload even if scraper partially failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}
+          path: batch_*.xlsx
+          retention-days: 30    # file stays available for 30 days
