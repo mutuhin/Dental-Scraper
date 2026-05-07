@@ -63,14 +63,16 @@ jobs:
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
-      # ── 5. Restore page cache (enables resume if job previously ran) ─────
-      - name: Restore scrape cache
-        uses: actions/cache@v4
+      # ── 5. Download previous page_cache artifact (resume support) ─────────
+      #       continue-on-error so first-ever run doesn't fail here
+      - name: Download previous cache (if exists)
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
         with:
+          workflow: scraper.yml
+          name: batch-${{ github.event.inputs.batch }}-cache
           path: page_cache/
-          key: batch-${{ github.event.inputs.batch }}-cache-${{ github.run_id }}
-          restore-keys: |
-            batch-${{ github.event.inputs.batch }}-cache-
+          if_no_artifact_found: ignore
 
       # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}
@@ -78,10 +80,21 @@ jobs:
 
       # ── 7. Upload xlsx as downloadable artifact ───────────────────────────
       - name: Upload scraped output
-        if: always()            # upload even if scraper partially failed
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: batch-${{ github.event.inputs.batch }}
           path: batch_*.xlsx
           retention-days: 30
+          overwrite: true
+
+      # ── 8. Upload page_cache so next re-run can resume ────────────────────
+      #       if: always() ensures this runs even when job is cancelled
+      - name: Upload page cache (for resume)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-cache
+          path: page_cache/
+          retention-days: 7
           overwrite: true
