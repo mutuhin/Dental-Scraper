@@ -2715,6 +2715,28 @@ def main():
             except Exception as e:
                 log.error(f"  ERROR: {practice.get('Practice Name')}: {e}", exc_info=True)
                 scraped = dict(EMPTY_SCRAPED)
+                # Recover Playwright if its page was closed/crashed by the error
+                if pw_context:
+                    try:
+                        if pw_page is None or pw_page.is_closed():
+                            log.warning("  Playwright page died — reopening…")
+                            pw_page = pw_context.new_page()
+                            pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                    except Exception:
+                        try:
+                            log.warning("  Playwright context dead — relaunching browser…")
+                            pw_context.close()
+                        except Exception:
+                            pass
+                        _pw2  = sync_playwright().__enter__()
+                        pw_context = _pw2.chromium.launch_persistent_context(
+                            user_data_dir="", headless=True,
+                            ignore_https_errors=True,
+                            args=["--disable-blink-features=AutomationControlled"],
+                            user_agent=HEADERS["User-Agent"],
+                        )
+                        pw_page = pw_context.new_page()
+                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
 
             all_results.append((practice, scraped))
 
