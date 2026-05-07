@@ -243,6 +243,13 @@ def extract_rating(html: str) -> tuple:
                     rm.group(1),
                     (cm.group(1) or cm.group(2) or "").replace(",", "") if cm else "",
                 )
+    # Also scan all elements with aria-label mentioning "review" for the count
+    for tag in soup.find_all(attrs={"aria-label": re.compile(r"review", re.I)}):
+        lbl = tag.get("aria-label", "")
+        cm  = re.search(r"([\d,]+)\s*reviews?", lbl, re.I)
+        if cm:
+            # Pair with rating already found (if any) — handled further down
+            pass
 
     # ── Method 3: data-attrid (Google knowledge panel) ────────────────────────
     for tag in soup.find_all(attrs={"data-attrid": True}):
@@ -288,29 +295,100 @@ def extract_rating_maps_pw(pw_page) -> tuple:
     except Exception:
         pass
 
-    # Try Playwright-level aria selectors first (faster + more reliable)
-    for sel in ('[aria-label*="stars"]', '[aria-label*="Star"]', 'span.ceNzKf'):
+    rating, count = "", ""
+
+    # ── Step 1: get rating from aria-label; also check if count is in the same label ─
+    for sel in ('[aria-label*="stars"]', '[aria-label*="Star"]', 'span.ceNzKf', 'span.MW4etd'):
         try:
             for el in pw_page.query_selector_all(sel):
                 lbl = el.get_attribute("aria-label") or ""
                 rm  = re.search(r"([1-5]\.\d)", lbl)
                 if rm:
                     rating = rm.group(1)
-                    # Try to get review count from the same panel
-                    try:
-                        panel_text = pw_page.query_selector('[role="main"]').inner_text()
-                    except Exception:
-                        panel_text = ""
-                    cm = re.search(r"\((\d[\d,]+)\)", panel_text)
-                    if not cm:
-                        cm = re.search(r"([\d,]+)\s*reviews?", panel_text, re.I)
-                    count = (cm.group(1) or "").replace(",", "") if cm else ""
-                    return rating, count
+                    # Count sometimes lives in the same aria-label
+                    cm = re.search(r"([\d,]+)\s*reviews?", lbl, re.I)
+                    if cm:
+                        count = cm.group(1).replace(",", "")
+                    break
+            if rating:
+                break
         except Exception:
             pass
 
-    # Fall back to full-page HTML parse
-    return extract_rating(pw_page.content())
+    # ── Step 2: if count still missing, try dedicated review-count elements ──────
+    if rating and not count:
+
+        # 2a: element with aria-label mentioning "review"
+        for sel in ('[aria-label*="review"]', '[aria-label*="Review"]'):
+            try:
+                for el in pw_page.query_selector_all(sel):
+                    lbl = el.get_attribute("aria-label") or ""
+                    cm  = re.search(r"([\d,]+)\s*reviews?", lbl, re.I)
+                    if cm:
+                        count = cm.group(1).replace(",", "")
+                        break
+                if count:
+                    break
+            except Exception:
+                pass
+
+        # 2b: rating/review button (jsaction="pane.rating…")
+        if not count:
+            for btn_sel in (
+                'button[jsaction*="pane.rating"]',
+                'button[jsaction*="review"]',
+                'button[data-value*="review"]',
+            ):
+                try:
+                    btn = pw_page.query_selector(btn_sel)
+                    if btn:
+                        btn_text = btn.inner_text() or ""
+                        cm = re.search(r"([\d,]+)", btn_text)
+                        if cm:
+                            count = cm.group(1).replace(",", "")
+                            break
+                except Exception:
+                    pass
+
+        # 2c: text_content() of main panel — includes CSS-hidden nodes inner_text() misses
+        if not count:
+            try:
+                panel = pw_page.query_selector('[role="main"]')
+                if panel:
+                    pt = panel.text_content() or ""
+                    cm = re.search(r"\((\d[\d,]*)\)", pt)
+                    if not cm:
+                        cm = re.search(r"([\d,]+)\s*reviews?", pt, re.I)
+                    if cm:
+                        count = cm.group(1).replace(",", "")
+            except Exception:
+                pass
+
+        # 2d: JavaScript extraction — scans every span/button for "(NNN)" or "NNN reviews"
+        if not count:
+            try:
+                count = pw_page.evaluate("""
+                    () => {
+                        for (const el of document.querySelectorAll('span, button, a')) {
+                            const t = (el.textContent || '').trim();
+                            let m = t.match(/^\\((\\d[\\d,]*)\\)$/);
+                            if (m) return m[1].replace(/,/g,'');
+                            m = t.match(/^(\\d[\\d,]*)\\s+reviews?$/i);
+                            if (m) return m[1].replace(/,/g,'');
+                        }
+                        const body = document.body.innerText || '';
+                        const m = body.match(/(\\d[\\d,]+)\\s+reviews?/i);
+                        return m ? m[1].replace(/,/g,'') : '';
+                    }
+                """) or ""
+            except Exception:
+                pass
+
+    # ── Step 3: if still no rating, fall back to full-page HTML parse ────────────
+    if not rating:
+        return extract_rating(pw_page.content())
+
+    return rating, count
 
 
 # ── Search functions ───────────────────────────────────────────────────────────
