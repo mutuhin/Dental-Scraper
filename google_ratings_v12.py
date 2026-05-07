@@ -232,24 +232,26 @@ def extract_rating(html: str) -> tuple:
         except Exception:
             pass
 
-    # ── Method 2: aria-label "X stars" (Google Maps result cards / business panel) ──
+    # ── Method 2: aria-label "X stars" + separate "N reviews" aria-labels ────
+    found_rating, found_count = "", ""
     for tag in soup.find_all(attrs={"aria-label": True}):
         lbl = tag.get("aria-label", "")
-        if re.search(r"[1-5]\.\d", lbl) and re.search(r"star|rated|review", lbl, re.I):
+        # Rating label: "4.8 stars" / "Rated 4.8 out of 5"
+        if re.search(r"[1-5]\.\d", lbl) and re.search(r"star|rated", lbl, re.I):
             rm = re.search(r"([1-5]\.\d)", lbl)
-            cm = re.search(r"\((\d[\d,]*)\)|(\d[\d,]*)\s*(?:user\s*)?review", lbl, re.I)
-            if rm:
-                return (
-                    rm.group(1),
-                    (cm.group(1) or cm.group(2) or "").replace(",", "") if cm else "",
-                )
-    # Also scan all elements with aria-label mentioning "review" for the count
-    for tag in soup.find_all(attrs={"aria-label": re.compile(r"review", re.I)}):
-        lbl = tag.get("aria-label", "")
-        cm  = re.search(r"([\d,]+)\s*reviews?", lbl, re.I)
-        if cm:
-            # Pair with rating already found (if any) — handled further down
-            pass
+            if rm and not found_rating:
+                found_rating = rm.group(1)
+                # Count sometimes in the same label
+                cm = re.search(r"([\d,]+)\s*reviews?", lbl, re.I)
+                if cm:
+                    found_count = cm.group(1).replace(",", "")
+        # Separate count label: "439 reviews" / "439 Google reviews"
+        if not found_count and re.search(r"review", lbl, re.I):
+            cm = re.search(r"([\d,]+)\s*reviews?", lbl, re.I)
+            if cm:
+                found_count = cm.group(1).replace(",", "")
+    if found_rating:
+        return found_rating, found_count
 
     # ── Method 3: data-attrid (Google knowledge panel) ────────────────────────
     for tag in soup.find_all(attrs={"data-attrid": True}):
@@ -258,6 +260,8 @@ def extract_rating(html: str) -> tuple:
             rm  = re.search(r"([1-5]\.\d)", txt)
             if rm:
                 cm = re.search(r"\((\d[\d,]+)\)", txt)
+                if not cm:
+                    cm = re.search(r"([\d,]+)\s*reviews?", txt, re.I)
                 return rm.group(1), (cm.group(1).replace(",", "") if cm else "")
 
     # ── Method 4: visible text patterns ───────────────────────────────────────
@@ -269,6 +273,7 @@ def extract_rating(html: str) -> tuple:
             r"\(" + re.escape(g_rating) + r"[^\)]*\)\s*([\d,]+)\s*(?:Google reviews?|reviews?)",
             r"\((\d[\d,]+)\)\s*(?:Google reviews?|reviews?)",
             r"([\d,]+)\s*(?:Google reviews?|reviews?)",
+            r"\((\d[\d,]+)\)",          # bare (439) — Maps result cards, no "reviews" text
         ):
             cm = re.search(pat, text, re.I)
             if cm:
@@ -279,10 +284,20 @@ def extract_rating(html: str) -> tuple:
         if g_rating != "1.0":
             return g_rating, ""
 
-    # ── Method 5: loose  "4.8 (342)" pattern ──────────────────────────────────
-    rm = re.search(r"\b([1-5]\.\d)\b[^\n]{0,30}\((\d[\d,]+)\)", text)
+    # ── Method 5: "4.8 (342)" — allow newlines between rating and count ────────
+    # [^\n]{0,30} was the old pattern; [\s\S]{0,60}? handles multiline layout
+    rm = re.search(r"\b([1-5]\.\d)\b[\s\S]{0,60}?\((\d[\d,]+)\)", text)
     if rm:
         return rm.group(1), rm.group(2).replace(",", "")
+
+    # ── Method 6: any (NNN) near any rating anywhere in the text ───────────────
+    for rm_r in re.finditer(r"\b([1-5]\.\d)\b", text):
+        window = text[rm_r.start(): rm_r.start() + 150]
+        cm = re.search(r"\((\d[\d,]+)\)", window)
+        if cm:
+            candidate = int(cm.group(1).replace(",", ""))
+            if candidate >= 1:
+                return rm_r.group(1), cm.group(1).replace(",", "")
 
     return "", ""
 
@@ -369,6 +384,7 @@ def extract_rating_maps_pw(pw_page) -> tuple:
             try:
                 count = pw_page.evaluate("""
                     () => {
+                        // Pass 1: element whose full text is exactly "(NNN)" or "NNN reviews"
                         for (const el of document.querySelectorAll('span, button, a')) {
                             const t = (el.textContent || '').trim();
                             let m = t.match(/^\\((\\d[\\d,]*)\\)$/);
@@ -376,6 +392,13 @@ def extract_rating_maps_pw(pw_page) -> tuple:
                             m = t.match(/^(\\d[\\d,]*)\\s+reviews?$/i);
                             if (m) return m[1].replace(/,/g,'');
                         }
+                        // Pass 2: any element containing "NNN reviews" somewhere
+                        for (const el of document.querySelectorAll('span, button, a, div')) {
+                            const t = (el.textContent || '').trim();
+                            const m = t.match(/(\\d[\\d,]+)\\s+reviews?/i);
+                            if (m && t.length < 80) return m[1].replace(/,/g,'');
+                        }
+                        // Pass 3: full page body text
                         const body = document.body.innerText || '';
                         const m = body.match(/(\\d[\\d,]+)\\s+reviews?/i);
                         return m ? m[1].replace(/,/g,'') : '';
@@ -521,7 +544,9 @@ def _places_text_search(query: str) -> tuple:
             if results:
                 first  = results[0]
                 rating = str(first.get("rating", "")).strip()
-                count  = str(first.get("user_ratings_total", "")).strip()
+                # user_ratings_total can be 0 (valid) — use explicit None check
+                raw_count = first.get("user_ratings_total")
+                count = str(raw_count) if raw_count is not None else ""
                 if rating:
                     return rating, count
     except Exception as e:
