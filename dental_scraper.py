@@ -62,11 +62,12 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION  — edit these values to control behaviour
 # ─────────────────────────────────────────────────────────────────────────────
-INPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/6000 Data COMPLETE.xlsx"
-OUTPUT_FILE = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
-DELAY_SEC   = 2.5     # seconds between HTTP requests
-TIMEOUT     = 15      # requests timeout (seconds)
-PW_TIMEOUT  = 25000   # Playwright timeout (ms)
+INPUT_FILE   = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/6000 Data COMPLETE.xlsx"
+OUTPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
+SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
+DELAY_SEC    = 2.5     # seconds between HTTP requests
+TIMEOUT      = 15      # requests timeout (seconds)
+PW_TIMEOUT   = 25000   # Playwright timeout (ms)
 
 
 # ── Row-range control (0-based index into the practices list) ──
@@ -1597,6 +1598,7 @@ def scrape_practice(row, pw_page=None):
 
     result = {
         # Practice info
+        "skip_reason":           "",   # set when site is bot-blocked or unreachable
         "email":                 "Not Found",
         "scraped_doctor_names":  "Not Found",
         "hygienists":            "N/A",
@@ -1754,6 +1756,26 @@ def scrape_practice(row, pw_page=None):
                     log.debug(f"   Playwright attempt failed for {try_url}: {e}")
             if not all_soup:
                 log.warning(f"   All URL variants failed for: {name}")
+                # Determine WHY: quick HEAD to classify block vs. unreachable
+                try:
+                    _probe = requests.head(
+                        base_url, headers=HEADERS, timeout=8, verify=False,
+                        allow_redirects=True,
+                    )
+                    _sc = _probe.status_code
+                    if _sc in (403, 429, 503) or (_sc >= 520 and _sc < 530):
+                        result["skip_reason"] = f"Bot Protection (HTTP {_sc})"
+                    elif _sc == 404:
+                        result["skip_reason"] = "Domain Not Found (404)"
+                    else:
+                        result["skip_reason"] = f"Access Blocked / JS Challenge (HTTP {_sc})"
+                except requests.exceptions.ConnectionError:
+                    result["skip_reason"] = "Connection Failed / Domain Unreachable"
+                except requests.exceptions.Timeout:
+                    result["skip_reason"] = "Connection Timeout"
+                except Exception:
+                    result["skip_reason"] = "Inaccessible (unknown)"
+                log.warning(f"   Skip reason: {result['skip_reason']}")
 
         # ── c) Scrape sub-pages ───────────────────────────────────────────────
         # Sub-page keywords — every link whose href contains any of these is visited
@@ -1768,6 +1790,17 @@ def scrape_practice(row, pw_page=None):
             "3d-imaging", "3d-xray", "3d-scan", "3d", "x-ray", "xray",
             "cerec", "digital", "hygiene", "patient", "faq",
             "smile", "restoration", "restorative", "general",
+            # priority field keywords — technology / services / doctor
+            "holistic", "biological", "biomimetic", "membership", "plan",
+            "advanced", "innovation", "equipment", "state-of-the-art",
+            "specialist", "specialty", "association", "membership",
+            "perio", "ortho", "endo", "oral-surgery", "oral-health",
+            "scan", "scanner", "imaging", "cbct", "cone-beam",
+            "itero", "3shape", "medit", "planmeca",
+            "overjet", "pearl", "diagnocat", "videa",
+            "waterlase", "biolase", "solea", "fotona",
+            "membership-plan", "dental-plan", "savings-plan", "wellness-plan",
+            "cancer", "oral-cancer", "velscope",
         ]
 
         _SKIP_EXTS = ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg',
@@ -1833,9 +1866,9 @@ def scrape_practice(row, pw_page=None):
             kw_urls  = _collect_subpage_links(all_soup, sub_pages_found)
             lvl1_urls = nav_urls + kw_urls
 
-            # ── Level-1 sub-pages (up to 40) ─────────────────────────────────
+            # ── Level-1 sub-pages (up to 60) ─────────────────────────────────
             lvl2_candidates = []
-            for sub_url in lvl1_urls[:40]:
+            for sub_url in lvl1_urls[:60]:
                 log.info(f"   Sub-page: {sub_url}")
                 time.sleep(DELAY_SEC)
                 sub_r = safe_get(sub_url)
@@ -1854,8 +1887,8 @@ def scrape_practice(row, pw_page=None):
                     # Collect level-2 candidates (keyword-filtered)
                     lvl2_candidates += _collect_subpage_links(sub_soup, sub_pages_found)
 
-            # ── Level-2 sub-pages (up to 20, new unique pages only) ───────────
-            for sub_url in lvl2_candidates[:20]:
+            # ── Level-2 sub-pages (up to 40, new unique pages only) ───────────
+            for sub_url in lvl2_candidates[:40]:
                 log.info(f"   Sub-page (L2): {sub_url}")
                 time.sleep(DELAY_SEC)
                 sub_r = safe_get(sub_url)
@@ -1871,6 +1904,43 @@ def scrape_practice(row, pw_page=None):
                             result["email"] = found_mail
                     _sub_counter[0] += 1
                     _cache(f"sub_{_sub_counter[0]:02d}", sub_url, sub_html)
+
+            # ── Level-3 priority pass — crawl every remaining same-domain link
+            # not yet visited in L1/L2. Capped at 30 pages to stay reasonable.
+            # Adds to all_text so field extraction (tech, services, specialty,
+            # associations) downstream benefits from the extra page content.
+            _l3_soups = ([all_soup]) + [sp for _, sp in all_scraped_soups]
+            _l3_seen  = set(sub_pages_found)
+            _l3_urls  = []
+            for _sp in _l3_soups:
+                for _a in _sp.find_all("a", href=True):
+                    _full = urljoin(base_url, _a["href"])
+                    if (
+                        _full.startswith("http")
+                        and urlparse(_full).netloc == urlparse(base_url).netloc
+                        and _full not in _l3_seen
+                        and not any(ext in _full.lower() for ext in _SKIP_EXTS)
+                    ):
+                        _l3_urls.append(_full)
+                        _l3_seen.add(_full)
+            if _l3_urls:
+                log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to 30")
+            for _l3_url in _l3_urls[:30]:
+                log.info(f"   Sub-page (L3): {_l3_url}")
+                time.sleep(DELAY_SEC)
+                _l3_r = safe_get(_l3_url)
+                if _l3_r:
+                    _l3_html = _l3_r.text
+                    all_text += " " + extract_text(_l3_html)
+                    _l3_soup = BeautifulSoup(_l3_html, "lxml")
+                    all_scraped_soups.append(("sub_l3", _l3_soup))
+                    _merge_socials(_l3_soup, _l3_html)
+                    if result["email"] == "Not Found":
+                        _em = _check_mailto(_l3_soup)
+                        if _em:
+                            result["email"] = _em
+                    _sub_counter[0] += 1
+                    _cache(f"sub_{_sub_counter[0]:02d}", _l3_url, _l3_html)
 
         # ── d) Extract fields that need soup (testimonials, email) ─────────────
         if all_soup:
@@ -1962,7 +2032,7 @@ def scrape_practice(row, pw_page=None):
                             and _full not in _seen_svc):
                         _svc_pw_urls.append(_full)
                         _seen_svc.add(_full)
-            for _svc_url in _svc_pw_urls[:3]:
+            for _svc_url in _svc_pw_urls[:10]:
                 try:
                     log.info(f"   Rendering service page (PW): {_svc_url}")
                     pw_page.goto(_svc_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
@@ -2337,7 +2407,7 @@ def write_output(practices_data, output_path):
     r_idx = 3
     for (inp, s) in practices_data:
         # Build doctor list: prefer per-doctor list; fall back to single row
-        doctors = s.get("doctors") or []
+        doctors = list(s.get("doctors") or [])
         if not doctors:
             fallback_name = (
                 s.get("scraped_doctor_names")
@@ -2351,6 +2421,32 @@ def write_output(practices_data, output_path):
                 "specialty":    s["specialty"],
                 "associations": s["associations"],
             }]
+
+        # Always ensure the practice owner (from "Office Name" / "Practice Name")
+        # appears in the doctor list.  The source column stores "Last, First";
+        # convert to "First Last" before inserting.
+        raw_owner = str(inp.get("Practice Name") or "").strip()
+        if raw_owner:
+            # Strip credentials (DDS, DMD, etc.)
+            owner_clean = _CRED_RE.sub("", raw_owner).strip(" ,.-")
+            # "Last, First" → "First Last"
+            if "," in owner_clean:
+                parts = [p.strip() for p in owner_clean.split(",", 1)]
+                owner_name = f"{parts[1]} {parts[0]}".strip() if parts[1] else parts[0]
+            else:
+                owner_name = owner_clean
+            # Only add if not already present (case-insensitive, credential-stripped dedup)
+            owner_key = _normalize_name_for_dedup(owner_name)
+            already_present = any(
+                _normalize_name_for_dedup(d.get("name", "")) == owner_key
+                for d in doctors
+            )
+            if owner_name and not already_present:
+                doctors.insert(0, {
+                    "name":         owner_name,
+                    "specialty":    s["specialty"],
+                    "associations": s["associations"],
+                })
 
         for doc in doctors:
             rf = fills["row_alt"] if r_idx % 2 == 0 else fills["white"]
@@ -2465,11 +2561,72 @@ def write_output(practices_data, output_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SKIPPED SITES OUTPUT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def write_skipped_sites(skipped: list, out_dir: str = SKIPPED_DIR):
+    """
+    Write an xlsx listing every practice whose website was blocked or unreachable.
+    skipped = list of (inp_dict, scraped_dict) tuples where scraped["skip_reason"] != "".
+    """
+    if not skipped:
+        log.info("  No skipped sites to write.")
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "skipped_sites.xlsx")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Skipped Sites"
+
+    hdr_font  = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    hdr_fill  = PatternFill("solid", fgColor="1F4E79")
+    ctr       = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    lft       = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    data_font = Font(name="Arial", size=10)
+
+    headers = ["#", "Practice Name", "Website", "City", "State", "Zip", "Skip Reason"]
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(1, c, h)
+        cell.font      = hdr_font
+        cell.fill      = hdr_fill
+        cell.alignment = ctr
+
+    alt_fill = PatternFill("solid", fgColor="DCE6F1")
+    for r_idx, (inp, s) in enumerate(skipped, 2):
+        row_fill = alt_fill if r_idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+        vals = [
+            inp.get("Index", ""),
+            inp.get("Practice Name", ""),
+            inp.get("Website", ""),
+            inp.get("City", ""),
+            inp.get("State", ""),
+            inp.get("Zip", ""),
+            s.get("skip_reason", ""),
+        ]
+        for c_idx, val in enumerate(vals, 1):
+            cell           = ws.cell(r_idx, c_idx, val)
+            cell.font      = data_font
+            cell.fill      = row_fill
+            cell.alignment = lft if c_idx in (2, 3, 7) else ctr
+
+    col_widths = {1: 6, 2: 30, 3: 38, 4: 16, 5: 7, 6: 8, 7: 40}
+    for col, w in col_widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[1].height = 24
+    ws.freeze_panes = "A2"
+
+    wb.save(out_path)
+    log.info(f"  Skipped sites saved → {out_path}  ({len(skipped)} practices)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 EMPTY_SCRAPED = {
-    "email": "ERROR", "scraped_doctor_names": "ERROR",
+    "skip_reason": "", "email": "ERROR", "scraped_doctor_names": "ERROR",
     "hygienists": "ERROR", "locations_count": "ERROR",
     "facebook_url": "", "facebook_posts": "ERROR", "facebook_followers": "ERROR",
     "instagram_url": "", "instagram_posts": "ERROR", "instagram_followers": "ERROR",
@@ -2552,8 +2709,15 @@ def main():
                 pass
 
     write_output(all_results, OUTPUT_FILE)
+
+    # Write skipped sites (bot-blocked / unreachable) to a separate file
+    skipped = [(inp, s) for (inp, s) in all_results if s.get("skip_reason")]
+    write_skipped_sites(skipped, SKIPPED_DIR)
+
     log.info(f"\n🎉 Done!  {len(all_results)} practices scraped.")
     log.info(f"   Output: {OUTPUT_FILE}")
+    if skipped:
+        log.info(f"   Skipped: {len(skipped)} blocked/unreachable → {SKIPPED_DIR}/skipped_sites.xlsx")
 
 
 if __name__ == "__main__":
