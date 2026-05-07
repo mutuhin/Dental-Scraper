@@ -98,6 +98,14 @@ jobs:
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
+      - name: Restore scrape cache
+        uses: actions/cache@v4
+        with:
+          path: page_cache/
+          key: batch-${{ matrix.batch }}-cache-${{ github.run_id }}
+          restore-keys: |
+            batch-${{ matrix.batch }}-cache-
+
       - name: Run batch ${{ matrix.batch }}
         run: python run_batch.py ${{ matrix.batch }}
 

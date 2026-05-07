@@ -351,7 +351,6 @@ def _cache_result(folder: str, practice_info: dict, result: dict):
     """Save the scraped non-HTML result dict to result.json inside the cache folder."""
     if not folder:
         return
-    # Serialise — doctors list is already JSON-able
     payload = {
         "practice": practice_info,
         "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -360,6 +359,23 @@ def _cache_result(folder: str, practice_info: dict, result: dict):
     }
     with open(os.path.join(folder, "result.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _load_cache_result(folder: str) -> dict | None:
+    """Load a previously saved result.json. Returns scraped dict or None if not found."""
+    if not folder:
+        return None
+    path = os.path.join(folder, "result.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        result = dict(payload.get("result", {}))
+        result["doctors"] = payload.get("doctors", [])
+        return result
+    except Exception:
+        return None
 
 INVISALIGN_TIERS = [
     "Diamond Plus", "Diamond",
@@ -2683,6 +2699,17 @@ def main():
     try:
         for i, practice in enumerate(practices, 1):
             log.info(f"[{i}/{len(practices)}] {practice.get('Practice Name')}")
+
+            # Resume: load from cache if already scraped in a previous run
+            folder = _cache_dir(practice.get("Index", i), practice.get("Practice Name", ""))
+            cached = _load_cache_result(folder)
+            if cached is not None:
+                log.info(f"  ✓ Loaded from cache — skipping re-scrape")
+                all_results.append((practice, cached))
+                if i % 10 == 0:
+                    write_output(all_results, OUTPUT_FILE)
+                continue
+
             try:
                 scraped = scrape_practice(practice, pw_page=pw_page)
             except Exception as e:
@@ -2692,7 +2719,6 @@ def main():
             all_results.append((practice, scraped))
 
             # Save result.json to cache for this practice
-            folder = _cache_dir(practice.get("Index", i), practice.get("Practice Name", ""))
             _cache_result(folder, practice, scraped)
 
             # Save progress every 10 practices

@@ -63,11 +63,20 @@ jobs:
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
-      # ── 5. Run the batch ──────────────────────────────────────────────────
+      # ── 5. Restore page cache (enables resume if job previously ran) ─────
+      - name: Restore scrape cache
+        uses: actions/cache@v4
+        with:
+          path: page_cache/
+          key: batch-${{ github.event.inputs.batch }}-cache-${{ github.run_id }}
+          restore-keys: |
+            batch-${{ github.event.inputs.batch }}-cache-
+
+      # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}
         run: python run_batch.py ${{ github.event.inputs.batch }}
 
-      # ── 6. Upload xlsx as downloadable artifact ───────────────────────────
+      # ── 7. Upload xlsx as downloadable artifact ───────────────────────────
       - name: Upload scraped output
         if: always()            # upload even if scraper partially failed
         uses: actions/upload-artifact@v4
