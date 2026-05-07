@@ -201,7 +201,7 @@ def _prewarm_browser(pw_page):
     """
     try:
         log.info("  Pre-warming browser session on Google…")
-        pw_page.goto("https://www.google.com", timeout=PW_TIMEOUT, wait_until="domcontentloaded")
+        pw_page.goto("https://www.google.com/?hl=en&gl=us", timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         time.sleep(random.uniform(4, 7))
         _jitter_mouse(pw_page)
         _human_scroll(pw_page)
@@ -320,7 +320,7 @@ def _maps_navigate_and_extract(pw_page, query: str, domain: str = "") -> tuple:
     Navigate Google Maps with query, try to identify the right listing,
     click it, and return (rating, count).
     """
-    url = f"https://www.google.com/maps/search/{quote_plus(query)}"
+    url = f"https://www.google.com/maps/search/{quote_plus(query)}?hl=en&gl=us"
     _human_delay(pw_page)
     pw_page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
     pw_page.wait_for_timeout(random.randint(2500, 4500))
@@ -566,6 +566,20 @@ def run():
         return
 
     log.info("Launching Playwright (visible browser)…")
+    # Clear old profile if it might have cached non-English Google preferences
+    _prefs_file = os.path.join(PW_USER_DATA, "Default", "Preferences")
+    if os.path.exists(_prefs_file):
+        try:
+            import json as _json
+            with open(_prefs_file, encoding="utf-8") as _pf:
+                _prefs = _json.load(_pf)
+            _lang = (_prefs.get("intl", {}) or {}).get("accept_languages", "en-US")
+            if "en" not in _lang.lower():
+                import shutil
+                shutil.rmtree(PW_USER_DATA, ignore_errors=True)
+                log.info("  Cleared cached non-English browser profile.")
+        except Exception:
+            pass
     os.makedirs(PW_USER_DATA, exist_ok=True)
     _pw = sync_playwright().__enter__()
     pw_ctx = _pw.chromium.launch_persistent_context(
@@ -573,18 +587,26 @@ def run():
         headless=False,
         slow_mo=150,
         ignore_https_errors=True,
+        locale="en-US",                        # force English UI
+        timezone_id="America/New_York",        # appear as US East Coast
+        geolocation={"latitude": 40.7128, "longitude": -74.0060},  # New York City
+        permissions=["geolocation"],
         args=[
             "--disable-blink-features=AutomationControlled",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-infobars",
+            "--lang=en-US",                    # Chrome language flag
         ],
         user_agent=HEADERS["User-Agent"],
     )
     # Apply stealth to every page opened from this context
     apply_stealth(pw_ctx)
     pw_page = pw_ctx.new_page()
-    pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+    pw_page.set_extra_http_headers({
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
 
     # Pre-warm: visit Google.com first to build a real cookie session
     _prewarm_browser(pw_page)
