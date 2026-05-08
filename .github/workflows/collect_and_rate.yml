@@ -237,6 +237,7 @@ jobs:
 
       # ── Upload merged file ────────────────────────────────────────────────
       - name: Upload merged batch
+        if: ${{ hashFiles('batch_merged.xlsx') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: batch-${{ github.event.inputs.batch }}-merged
@@ -251,12 +252,16 @@ jobs:
           CI: 'true'
           GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
         run: |
+          if [ ! -f batch_merged.xlsx ]; then
+            echo "batch_merged.xlsx not found — no data was collected for this batch. Skipping Google ratings."
+            exit 0
+          fi
           mkdir -p artifacts/merged
           cp batch_merged.xlsx artifacts/merged/
           python google_ratings_workflow.py
 
       - name: Upload Google ratings output
-        if: ${{ github.event.inputs.skip_ratings != 'true' }}
+        if: ${{ github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output.xlsx') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: google-ratings-batch-${{ github.event.inputs.batch }}
