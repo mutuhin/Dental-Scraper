@@ -29,6 +29,10 @@ on:
           - '50'
           - '60'
         default: '1'
+      start_row:
+        description: 'Optional: resume from this row (e.g. 95 to scrape only rows 95-100 of batch 1)'
+        required: false
+        default: ''
 
 jobs:
   scrape:
@@ -88,7 +92,7 @@ jobs:
 
       # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}
-        run: python run_batch.py ${{ github.event.inputs.batch }}
+        run: python run_batch.py ${{ github.event.inputs.batch }} ${{ github.event.inputs.start_row }}
 
       # ── 7. Upload xlsx as downloadable artifact ───────────────────────────
       - name: Upload scraped output

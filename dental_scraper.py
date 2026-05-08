@@ -65,9 +65,15 @@ except ImportError:
 INPUT_FILE   = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/6000 Data COMPLETE.xlsx"
 OUTPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
 SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
-DELAY_SEC    = 2.5     # seconds between HTTP requests
-TIMEOUT      = 15      # requests timeout (seconds)
-PW_TIMEOUT   = 25000   # Playwright timeout (ms)
+# In GitHub Actions (CI=true) use tighter limits so 100 practices finish in ~2.5h
+IS_CI        = os.environ.get("CI", "").lower() in ("true", "1")
+DELAY_SEC    = 1.5  if IS_CI else 2.5
+TIMEOUT      = 10   if IS_CI else 15
+PW_TIMEOUT   = 15000 if IS_CI else 25000
+# Sub-page crawl limits — reduced in CI to stay well within 5.5h timeout
+L1_LIMIT     = 25   if IS_CI else 60
+L2_LIMIT     = 15   if IS_CI else 40
+L3_LIMIT     = 10   if IS_CI else 30
 
 
 # ── Row-range control (0-based index into the practices list) ──
@@ -1884,7 +1890,7 @@ def scrape_practice(row, pw_page=None):
 
             # ── Level-1 sub-pages (up to 60) ─────────────────────────────────
             lvl2_candidates = []
-            for sub_url in lvl1_urls[:60]:
+            for sub_url in lvl1_urls[:L1_LIMIT]:
                 log.info(f"   Sub-page: {sub_url}")
                 time.sleep(DELAY_SEC)
                 sub_r = safe_get(sub_url)
@@ -1904,7 +1910,7 @@ def scrape_practice(row, pw_page=None):
                     lvl2_candidates += _collect_subpage_links(sub_soup, sub_pages_found)
 
             # ── Level-2 sub-pages (up to 40, new unique pages only) ───────────
-            for sub_url in lvl2_candidates[:40]:
+            for sub_url in lvl2_candidates[:L2_LIMIT]:
                 log.info(f"   Sub-page (L2): {sub_url}")
                 time.sleep(DELAY_SEC)
                 sub_r = safe_get(sub_url)
@@ -1941,7 +1947,7 @@ def scrape_practice(row, pw_page=None):
                         _l3_seen.add(_full)
             if _l3_urls:
                 log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to 30")
-            for _l3_url in _l3_urls[:30]:
+            for _l3_url in _l3_urls[:L3_LIMIT]:
                 log.info(f"   Sub-page (L3): {_l3_url}")
                 time.sleep(DELAY_SEC)
                 _l3_r = safe_get(_l3_url)
