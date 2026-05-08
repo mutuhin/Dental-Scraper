@@ -108,58 +108,67 @@ jobs:
           BATCH="${{ github.event.inputs.batch }}"
           ARTIFACT="batch-${BATCH}"
           mkdir -p artifacts
-
           ATTEMPT=0
 
-          # Helper: download one run's artifact and copy to DEST
-          try_download() {
-            local run_id="$1" dest_prefix="$2"
-            local TMP; TMP=$(mktemp -d)
-            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
-              local FILES
-              FILES=$(find "$TMP/$ARTIFACT" -name "*.xlsx" 2>/dev/null || true)
-              if [ -n "$FILES" ]; then
-                ATTEMPT=$((ATTEMPT + 1))
-                local DEST="artifacts/${dest_prefix}_run${run_id}"
-                mkdir -p "$DEST"
-                cp -r "$TMP/$ARTIFACT/." "$DEST/"
-                echo "  Run $run_id → $DEST"
+          echo "=== Listing all repo artifacts named: $ARTIFACT ==="
+
+          # Use the Artifacts REST API to find every artifact with this exact name.
+          # Download each one by artifact ID (zip) — no dependency on run-list or workflow name.
+          PAGE=1
+          while true; do
+            RESP=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT}&per_page=100&page=${PAGE}" \
+              2>/dev/null || echo "")
+
+            # Break if API call failed or returned empty
+            [ -z "$RESP" ] && break
+
+            COUNT=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('artifacts',[])))" 2>/dev/null || echo "0")
+            [ "$COUNT" = "0" ] && break
+
+            echo "  Page $PAGE → $COUNT artifact(s)"
+
+            # For each artifact on this page, download by artifact ID
+            ARTIFACT_IDS=$(echo "$RESP" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for a in d.get('artifacts', []):
+              if not a.get('expired', False):
+                  print(a['id'])
+          " 2>/dev/null || echo "")
+
+            for art_id in $ARTIFACT_IDS; do
+              DEST="artifacts/artifact_${art_id}"
+              if [ -d "$DEST" ]; then
+                echo "  Artifact $art_id already downloaded — skipping"
+                continue
               fi
-            fi
-            rm -rf "$TMP"
-          }
+              mkdir -p "$DEST"
+              echo -n "  Downloading artifact $art_id … "
+              if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${art_id}/zip" > "$DEST/download.zip" 2>/dev/null; then
+                unzip -q "$DEST/download.zip" -d "$DEST/" 2>/dev/null || true
+                rm -f "$DEST/download.zip"
+                FILES=$(find "$DEST" -name "*.xlsx" 2>/dev/null || true)
+                if [ -n "$FILES" ]; then
+                  ATTEMPT=$((ATTEMPT + 1))
+                  echo "OK ($(echo "$FILES" | wc -l | tr -d ' ') xlsx file(s))"
+                else
+                  echo "no xlsx files found"
+                  rm -rf "$DEST"
+                fi
+              else
+                echo "FAILED"
+                rm -rf "$DEST"
+              fi
+            done
 
-          # Strategy 1: search by workflow filename
-          echo "=== Searching scraper.yml runs for $ARTIFACT ==="
-          SCRAPER_RUNS=$(gh run list --workflow=scraper.yml --limit=50 \
-                           --json databaseId --jq '.[].databaseId' 2>/dev/null || echo "")
-          for run_id in $SCRAPER_RUNS; do
-            try_download "$run_id" "scraper"
-          done
-
-          echo "=== Searching scrape_remaining.yml runs for $ARTIFACT ==="
-          REMAINING_RUNS=$(gh run list --workflow=scrape_remaining.yml --limit=50 \
-                             --json databaseId --jq '.[].databaseId' 2>/dev/null || echo "")
-          for run_id in $REMAINING_RUNS; do
-            try_download "$run_id" "remaining"
-          done
-
-          # Strategy 2: use the API to directly find all artifacts named batch-N
-          # (catches runs from any workflow, regardless of filename)
-          echo "=== API search: all artifacts named $ARTIFACT ==="
-          API_RUN_IDS=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT}&per_page=100" \
-            --jq '.artifacts[].workflow_run.id' 2>/dev/null | sort -u || echo "")
-          for run_id in $API_RUN_IDS; do
-            # Skip if already downloaded by strategy 1
-            if ls artifacts/*/  2>/dev/null | grep -q "run${run_id}"; then
-              continue
-            fi
-            try_download "$run_id" "api"
+            # Stop if fewer than 100 results (last page)
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE + 1))
           done
 
           echo ""
-          echo "Total attempts found: $ATTEMPT"
+          echo "Total artifacts downloaded: $ATTEMPT"
           echo "All xlsx files:"
           find artifacts -name "*.xlsx" | sort || true
 
