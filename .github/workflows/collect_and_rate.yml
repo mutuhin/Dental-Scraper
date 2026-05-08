@@ -1,0 +1,219 @@
+name: Collect All Attempts + Google Ratings
+
+# Downloads every attempt of a batch (all partial runs), merges them
+# into one complete file, then runs Google ratings scraping on the result.
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Batch number to collect (1 = rows 1-100, 2 = rows 101-200 …)'
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
+          - '9'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '20'
+          - '30'
+          - '40'
+          - '50'
+          - '60'
+        default: '1'
+      skip_ratings:
+        description: 'Skip Google ratings scraping (just merge the batch files)?'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  collect_and_rate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests beautifulsoup4 openpyxl lxml curl-cffi playwright python-dateutil
+
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
+
+      # ── Collect every attempt of batch-N from both scraper workflows ──────
+      - name: Download all attempts for batch ${{ github.event.inputs.batch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BATCH="${{ github.event.inputs.batch }}"
+          ARTIFACT="batch-${BATCH}"
+          mkdir -p artifacts
+
+          echo "=== Searching scraper.yml runs for $ARTIFACT ==="
+          ATTEMPT=0
+          for run_id in $(gh run list --workflow=scraper.yml --limit=50 \
+                            --json databaseId --jq '.[].databaseId'); do
+            TMP=$(mktemp -d)
+            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
+              FILES=$(find "$TMP/$ARTIFACT" -name "*.xlsx" 2>/dev/null)
+              if [ -n "$FILES" ]; then
+                ATTEMPT=$((ATTEMPT + 1))
+                DEST="artifacts/scraper_run${run_id}"
+                mkdir -p "$DEST"
+                cp -r "$TMP/$ARTIFACT/." "$DEST/"
+                ROWS=$(python3 -c "
+          import openpyxl, glob
+          total=0
+          for f in glob.glob('$DEST/*.xlsx'):
+              wb=openpyxl.load_workbook(f,read_only=True,data_only=True)
+              ws=wb.active
+              total+=sum(1 for r in ws.iter_rows(min_row=3,values_only=True) if r[0] is not None)
+              wb.close()
+          print(total)
+          " 2>/dev/null || echo "?")
+                echo "  Run $run_id → $DEST ($ROWS data rows)"
+              fi
+            fi
+          done
+
+          echo "=== Searching scrape_remaining.yml runs for $ARTIFACT ==="
+          for run_id in $(gh run list --workflow=scrape_remaining.yml --limit=50 \
+                            --json databaseId --jq '.[].databaseId'); do
+            TMP=$(mktemp -d)
+            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
+              FILES=$(find "$TMP/$ARTIFACT" -name "*.xlsx" 2>/dev/null)
+              if [ -n "$FILES" ]; then
+                ATTEMPT=$((ATTEMPT + 1))
+                DEST="artifacts/remaining_run${run_id}"
+                mkdir -p "$DEST"
+                cp -r "$TMP/$ARTIFACT/." "$DEST/"
+                echo "  Run $run_id → $DEST"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "Total attempts found: $ATTEMPT"
+          echo "All xlsx files:"
+          find artifacts -name "*.xlsx" | sort
+
+      # ── Merge all collected files into one ────────────────────────────────
+      - name: Merge all attempts into one file
+        run: |
+          python3 - <<'PYEOF'
+          import os, glob, openpyxl
+          from openpyxl import Workbook
+          from copy import copy
+
+          files = sorted(glob.glob("artifacts/**/*.xlsx", recursive=True))
+          print(f"Files to merge: {len(files)}")
+          for f in files:
+              print(f"  {f}")
+
+          if not files:
+              print("No files found — nothing to merge")
+              exit(0)
+
+          # Read all rows from all files, deduplicate by practice index
+          # Keep the row from the file that has the most non-empty fields
+          # (later/more complete runs override earlier partial ones)
+          seen = {}   # index -> (row_values, field_count)
+
+          # Load column headers from first file
+          wb0 = openpyxl.load_workbook(files[0], read_only=True, data_only=True)
+          ws0 = wb0.active
+          # Copy first two header rows
+          header_rows = []
+          for ri in range(1, 3):
+              header_rows.append([ws0.cell(ri, c).value for c in range(1, ws0.max_column + 1)])
+          max_col = ws0.max_column
+          wb0.close()
+
+          for fpath in files:
+              wb = openpyxl.load_workbook(fpath, read_only=True, data_only=True)
+              ws = wb.active
+              file_rows = 0
+              for row in ws.iter_rows(min_row=3, values_only=True):
+                  idx = row[0]
+                  if idx is None:
+                      continue
+                  key = str(idx)
+                  filled = sum(1 for v in row if v not in (None, "", "ERROR", "Not Found"))
+                  if key not in seen or filled > seen[key][1]:
+                      seen[key] = (list(row), filled)
+                  file_rows += 1
+              wb.close()
+              print(f"  Read {file_rows} rows from {os.path.basename(fpath)}")
+
+          # Sort by practice index and write output
+          def _sort_key(item):
+              try: return float(item[0])
+              except: return 0
+
+          out_rows = [v[0] for v in sorted(seen.values(), key=_sort_key)]
+          print(f"\nTotal unique practices after merge: {len(out_rows)}")
+
+          # Write to new workbook preserving structure
+          wb_out = openpyxl.load_workbook(files[0], data_only=True)
+          ws_out = wb_out.active
+
+          # Clear existing data rows
+          for ri in range(ws_out.max_row, 2, -1):
+              ws_out.delete_rows(ri)
+
+          # Append merged rows
+          for row_vals in out_rows:
+              ws_out.append(row_vals)
+
+          wb_out.save("batch_merged.xlsx")
+          print(f"Saved → batch_merged.xlsx ({len(out_rows)} practices)")
+          PYEOF
+
+      # ── Upload merged file ────────────────────────────────────────────────
+      - name: Upload merged batch
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-merged
+          path: batch_merged.xlsx
+          retention-days: 30
+          overwrite: true
+
+      # ── Run Google ratings on merged data ─────────────────────────────────
+      - name: Run Google ratings scraper
+        if: ${{ github.event.inputs.skip_ratings != 'true' }}
+        env:
+          CI: 'true'
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+        run: |
+          mkdir -p artifacts/merged
+          cp batch_merged.xlsx artifacts/merged/
+          python google_ratings_workflow.py
+
+      - name: Upload Google ratings output
+        if: ${{ github.event.inputs.skip_ratings != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-ratings-batch-${{ github.event.inputs.batch }}
+          path: google_ratings_output.xlsx
+          retention-days: 30
+          overwrite: true
