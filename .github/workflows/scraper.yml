@@ -64,15 +64,23 @@ jobs:
         run: playwright install chromium --with-deps
 
       # ── 5. Download previous page_cache artifact (resume support) ─────────
-      #       continue-on-error so first-ever run doesn't fail here
       - name: Download previous cache (if exists)
-        uses: dawidd6/action-download-artifact@v3
         continue-on-error: true
-        with:
-          workflow: scraper.yml
-          name: batch-${{ github.event.inputs.batch }}-cache
-          path: page_cache/
-          if_no_artifact_found: ignore
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p page_cache
+          ARTIFACT="batch-${{ github.event.inputs.batch }}-cache"
+          # Search last 10 runs of this workflow (any conclusion — failed/cancelled/success)
+          for run_id in $(gh run list --workflow=scraper.yml --limit=10 \
+                            --json databaseId --jq '.[].databaseId'); do
+            TMP=$(mktemp -d)
+            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
+              cp -r "$TMP/$ARTIFACT/." page_cache/
+              echo "Cache restored from run $run_id ($(ls page_cache | wc -l) entries)"
+              break
+            fi
+          done
 
       # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}

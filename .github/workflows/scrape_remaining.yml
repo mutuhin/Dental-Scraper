@@ -100,13 +100,21 @@ jobs:
 
       # Download previous page_cache artifact so re-runs skip already-done rows
       - name: Download previous cache (if exists)
-        uses: dawidd6/action-download-artifact@v3
         continue-on-error: true
-        with:
-          workflow: scrape_remaining.yml
-          name: batch-${{ matrix.batch }}-cache
-          path: page_cache/
-          if_no_artifact_found: ignore
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p page_cache
+          ARTIFACT="batch-${{ matrix.batch }}-cache"
+          for run_id in $(gh run list --workflow=scrape_remaining.yml --limit=10 \
+                            --json databaseId --jq '.[].databaseId'); do
+            TMP=$(mktemp -d)
+            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
+              cp -r "$TMP/$ARTIFACT/." page_cache/
+              echo "Cache restored from run $run_id ($(ls page_cache | wc -l) entries)"
+              break
+            fi
+          done
 
       - name: Run batch ${{ matrix.batch }}
         run: python run_batch.py ${{ matrix.batch }}
