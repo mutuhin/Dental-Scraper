@@ -63,24 +63,28 @@ jobs:
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
-      # ── 5. Download previous page_cache artifact (resume support) ─────────
-      - name: Download previous cache (if exists)
+      # ── 5. Restore page cache from previous run (resume support) ──────────
+      - name: Restore page cache
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p page_cache
           ARTIFACT="batch-${{ github.event.inputs.batch }}-cache"
-          # Search last 10 runs of this workflow (any conclusion — failed/cancelled/success)
-          for run_id in $(gh run list --workflow=scraper.yml --limit=10 \
+          echo "Looking for artifact: $ARTIFACT"
+          for run_id in $(gh run list --workflow=scraper.yml --limit=20 \
                             --json databaseId --jq '.[].databaseId'); do
             TMP=$(mktemp -d)
             if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
-              cp -r "$TMP/$ARTIFACT/." page_cache/
-              echo "Cache restored from run $run_id ($(ls page_cache | wc -l) entries)"
-              break
+              TARBALL="$TMP/$ARTIFACT/page_cache.tar.gz"
+              if [ -f "$TARBALL" ]; then
+                tar -xzf "$TARBALL" -C .
+                COUNT=$(find page_cache -name "result.json" 2>/dev/null | wc -l)
+                echo "Cache restored from run $run_id — $COUNT practices cached, skipping re-scrape"
+                break
+              fi
             fi
           done
+          echo "Cache entries found: $(find page_cache -name 'result.json' 2>/dev/null | wc -l)"
 
       # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}
@@ -96,13 +100,24 @@ jobs:
           retention-days: 30
           overwrite: true
 
-      # ── 8. Upload page_cache so next re-run can resume ────────────────────
-      #       if: always() ensures this runs even when job is cancelled
+      # ── 8. Pack and upload page cache so next re-run can resume ───────────
       - name: Upload page cache (for resume)
+        if: always()
+        run: |
+          COUNT=$(find page_cache -name "result.json" 2>/dev/null | wc -l)
+          echo "Packing $COUNT cached practices into page_cache.tar.gz"
+          if [ "$COUNT" -gt 0 ]; then
+            tar -czf page_cache.tar.gz page_cache/
+          else
+            echo "No cache to upload — skipping"
+          fi
+
+      - name: Save cache artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: batch-${{ github.event.inputs.batch }}-cache
-          path: page_cache/
+          path: page_cache.tar.gz
+          if-no-files-found: ignore
           retention-days: 7
           overwrite: true
