@@ -25,6 +25,7 @@ import re
 import sys
 import os
 import json
+import random
 import logging
 import warnings
 import unicodedata
@@ -110,162 +111,285 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+_SOCIAL_UA_LIST = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+_CFFI_PROFILES  = ["chrome124", "chrome136", "chrome133a", "safari260"]
+_CFFI_IG_PROF   = ["chrome124", "chrome136", "safari260"]
+
 SERVICE_KEYWORDS = {
-    "invisalign":        "Invisalign",
-    "clear aligner":     "Clear Aligners",
-    "suresmile":         "Clear Aligners",
-    "clearcorrect":      "Clear Aligners",
-    "spark aligner":     "Clear Aligners",
-    "byte aligner":      "Clear Aligners",
-    "candidpro":         "Clear Aligners",
-    "candid pro":        "Clear Aligners",
-    "invisible brace":   "Clear Aligners",
-    "clear brace":       "Clear Aligners",
-    "veneers":           "Veneers",
-    "veneer":            "Veneers",
-    "porcelain veneer":  "Veneers",
-    "implant":           "Implants",
-    "smile makeover":    "Smile Makeovers",
-    "smile transformation": "Smile Makeovers",
-    "smile design":      "Smile Makeovers",
-    "smile redesign":    "Smile Makeovers",
-    "complete smile":    "Smile Makeovers",
-    "full smile":        "Smile Makeovers",
-    "total smile":       "Smile Makeovers",
-    "smile restoration": "Smile Makeovers",
-    "whitening":         "Teeth Whitening",
-    "bleach":            "Teeth Whitening",
-    "zoom":              "Teeth Whitening",
-    "opalescence":       "Teeth Whitening",
-    "bright smile":      "Teeth Whitening",
-    "kor whitening":     "Teeth Whitening",
-    "sedation":          "Sedation Dentistry",
-    "sleep dentistry":   "Sedation Dentistry",
-    "nitrous oxide":     "Sedation Dentistry",
-    "laughing gas":      "Sedation Dentistry",
-    "iv sedation":       "Sedation Dentistry",
-    "oral conscious":    "Sedation Dentistry",
-    "holistic":          "Holistic Dentistry",
-    "biological":        "Holistic Dentistry",
-    "mercury-free":      "Holistic Dentistry",
-    "mercury free":      "Holistic Dentistry",
-    "mercury safe":      "Holistic Dentistry",
-    "fluoride-free":     "Holistic Dentistry",
-    "biocompatible":     "Holistic Dentistry",
-    "ozone therapy":     "Holistic Dentistry",
-    "zirconia implant":  "Holistic Dentistry",
-    "metal-free":        "Holistic Dentistry",
-    "cancer screening":  "Cancer Screening",
-    "oral cancer":       "Cancer Screening",
-    "velscope":          "Cancer Screening",
-    "identafi":          "Cancer Screening",
-    "vizilite":          "Cancer Screening",
-    "oral id":           "Cancer Screening",
-    # "dental plan" excluded — too generic, matches insurance references
-    "membership plan":     "Dental Plan",
-    "dental membership":   "Dental Plan",
-    "annual membership":   "Dental Plan",
-    "in-house plan":       "Dental Plan",
-    "in house plan":       "Dental Plan",
-    "in-house membership": "Dental Plan",
-    "in house membership": "Dental Plan",
-    "savings plan":        "Dental Plan",
-    "dental savings":      "Dental Plan",
-    "discount plan":       "Dental Plan",
-    "wellness plan":       "Dental Plan",
-    "dental subscription": "Dental Plan",
-    "uninsured patients":  "Dental Plan",
-    "without insurance":   "Dental Plan",
-    "no dental insurance": "Dental Plan",
-    "no insurance":        "Dental Plan",
-    "in-office plan":      "Dental Plan",
-    "preventive plan":     "Dental Plan",
-    "care plan":           "Dental Plan",
+    # ── Invisalign ────────────────────────────────────────────────────────────
+    "invisalign":            "Invisalign",
+
+    # ── Clear Aligners ────────────────────────────────────────────────────────
+    "clear aligner":         "Clear Aligners",
+    "suresmile":             "Clear Aligners",
+    "clearcorrect":          "Clear Aligners",
+    "spark aligner":         "Clear Aligners",
+    "byte aligner":          "Clear Aligners",
+    "candidpro":             "Clear Aligners",
+    "candid pro":            "Clear Aligners",
+    "invisible brace":       "Clear Aligners",
+    "clear brace":           "Clear Aligners",
+    "smiledirectclub":       "Clear Aligners",
+    "smile direct club":     "Clear Aligners",
+    "reveal aligner":        "Clear Aligners",
+    "evo aligner":           "Clear Aligners",
+    "ulab aligner":          "Clear Aligners",
+    "angelalign":            "Clear Aligners",
+    "3m clarity":            "Clear Aligners",
+    "ormco aligner":         "Clear Aligners",
+
+    # ── Veneers ───────────────────────────────────────────────────────────────
+    "veneers":               "Veneers",
+    "veneer":                "Veneers",
+    "porcelain veneer":      "Veneers",
+    "composite veneer":      "Veneers",
+    "lumineers":             "Veneers",
+    "dental laminate":       "Veneers",
+    "dental laminates":      "Veneers",
+    "tooth laminates":       "Veneers",
+
+    # ── Implants ──────────────────────────────────────────────────────────────
+    "implant":               "Implants",
+
+    # ── Smile Makeovers ───────────────────────────────────────────────────────
+    "smile makeover":        "Smile Makeovers",
+    "smile transformation":  "Smile Makeovers",
+    "smile design":          "Smile Makeovers",
+    "smile redesign":        "Smile Makeovers",
+    "complete smile":        "Smile Makeovers",
+    "full smile":            "Smile Makeovers",
+    "total smile":           "Smile Makeovers",
+    "smile restoration":     "Smile Makeovers",
+    "smile enhancement":     "Smile Makeovers",
+    "cosmetic makeover":     "Smile Makeovers",
+    "aesthetic dentistry":   "Smile Makeovers",
+
+    # ── Teeth Whitening ───────────────────────────────────────────────────────
+    "whitening":             "Teeth Whitening",
+    "bleach":                "Teeth Whitening",
+    "zoom whitening":        "Teeth Whitening",
+    "zoom! whitening":       "Teeth Whitening",
+    "philips zoom":          "Teeth Whitening",
+    "opalescence":           "Teeth Whitening",
+    "bright smile":          "Teeth Whitening",
+    "kor whitening":         "Teeth Whitening",
+    "glo whitening":         "Teeth Whitening",
+    "enlighten whitening":   "Teeth Whitening",
+    "pola whitening":        "Teeth Whitening",
+    "nusmile":               "Teeth Whitening",
+    "teeth brightening":     "Teeth Whitening",
+
+    # ── Sedation Dentistry ────────────────────────────────────────────────────
+    "sedation":              "Sedation Dentistry",
+    "sleep dentistry":       "Sedation Dentistry",
+    "nitrous oxide":         "Sedation Dentistry",
+    "laughing gas":          "Sedation Dentistry",
+    "iv sedation":           "Sedation Dentistry",
+    "oral conscious":        "Sedation Dentistry",
+    "conscious sedation":    "Sedation Dentistry",
+    "general anesthesia":    "Sedation Dentistry",
+    "twilight sedation":     "Sedation Dentistry",
+    "minimal sedation":      "Sedation Dentistry",
+    "moderate sedation":     "Sedation Dentistry",
+    "dental anxiety":        "Sedation Dentistry",
+    "relaxation dentistry":  "Sedation Dentistry",
+    "comfort dentistry":     "Sedation Dentistry",
+
+    # ── Holistic Dentistry ────────────────────────────────────────────────────
+    "holistic":              "Holistic Dentistry",
+    "biological dentist":    "Holistic Dentistry",
+    "mercury-free":          "Holistic Dentistry",
+    "mercury free":          "Holistic Dentistry",
+    "mercury safe":          "Holistic Dentistry",
+    "fluoride-free":         "Holistic Dentistry",
+    "biocompatible":         "Holistic Dentistry",
+    "ozone therapy":         "Holistic Dentistry",
+    "zirconia implant":      "Holistic Dentistry",
+    "metal-free":            "Holistic Dentistry",
+    "smart protocol":        "Holistic Dentistry",
+    "naturopathic dent":     "Holistic Dentistry",
+    "non-toxic dentist":     "Holistic Dentistry",
+    "bioregulatory":         "Holistic Dentistry",
+    "ceramic implant":       "Holistic Dentistry",
+    "zurich protocol":       "Holistic Dentistry",
+    "natural dentistry":     "Holistic Dentistry",
+
+    # ── Cancer Screening ──────────────────────────────────────────────────────
+    "cancer screening":      "Cancer Screening",
+    "oral cancer":           "Cancer Screening",
+    "velscope":              "Cancer Screening",
+    "identafi":              "Cancer Screening",
+    "vizilite":              "Cancer Screening",
+    "oral id":               "Cancer Screening",
+    "oralid":                "Cancer Screening",
+    "fluorescence screening":"Cancer Screening",
+    "early detection oral":  "Cancer Screening",
+    "tissue staining":       "Cancer Screening",
+
+    # ── Dental Plan (Membership) — only specific plan phrases, no generic terms
+    "membership plan":       "Dental Plan",
+    "dental membership":     "Dental Plan",
+    "annual membership":     "Dental Plan",
+    "in-house plan":         "Dental Plan",
+    "in house plan":         "Dental Plan",
+    "in-house membership":   "Dental Plan",
+    "in house membership":   "Dental Plan",
+    "dental savings":        "Dental Plan",
+    "dental subscription":   "Dental Plan",
+    "uninsured patients":    "Dental Plan",
+    "no dental insurance":   "Dental Plan",
+    "in-office plan":        "Dental Plan",
+    "office membership":     "Dental Plan",
+    "patient membership":    "Dental Plan",
+    "dental club":           "Dental Plan",
+    "monthly dental plan":   "Dental Plan",
+    "annual dental plan":    "Dental Plan",
+    "wellness membership":   "Dental Plan",
+    # removed: "savings plan", "discount plan", "wellness plan", "care plan",
+    # "no insurance", "without insurance", "preventive plan" — too generic
 }
 
 TECH_KEYWORDS = {
-    # CEREC / Same-day crowns
-    "cerec":                   "CEREC",
-    "same day crown":          "CEREC",
-    "same-day crown":          "CEREC",
-    "same day restoration":    "CEREC",
-    "in-office crown":         "CEREC",
-    "chairside crown":         "CEREC",
-    "milled crown":            "CEREC",
-    "chairside milling":       "CEREC",
-    "in-office milling":       "CEREC",
-    "single visit crown":      "CEREC",
-    "one visit crown":         "CEREC",
-    "one-visit crown":         "CEREC",
-    "e4d":                     "CEREC",
-    "primescan":               "CEREC",
-    "omnicam":                 "CEREC",
-    # CBCT / 3D Imaging
-    "cbct":                    "CBCT",
-    "cone beam":               "CBCT",
-    "3d imaging":              "CBCT",
-    "3d x-ray":                "CBCT",
-    "3d xray":                 "CBCT",
-    "3d x ray":                "CBCT",
-    "3d scan":                 "CBCT",
-    "3d radiograph":           "CBCT",
-    "i-cat":                   "CBCT",
-    "dental ct":               "CBCT",
-    "planmeca":                "CBCT",
-    "vatech":                  "CBCT",
-    "kavo cbct":               "CBCT",
-    "acteon":                  "CBCT",
-    "3d cone beam":            "CBCT",
-    "galileos":                "CBCT",
-    "prexion":                 "CBCT",
-    "cs 9600":                 "CBCT",
-    "cs9600":                  "CBCT",
-    # Lasers
-    "laser":                   "Lasers",
-    "waterlase":               "Lasers",
-    "biolase":                 "Lasers",
-    "solea laser":             "Lasers",
-    "diode laser":             "Lasers",
-    "erbium laser":            "Lasers",
-    "fotona":                  "Lasers",
-    "lightwalker":             "Lasers",
-    "dental laser":            "Lasers",
-    # AI
-    " ai ":                    "AI",
-    "artificial intelligence": "AI",
-    "overjet":                 "AI",
-    "pearl ai":                "AI",
-    "diagnocat":               "AI",
-    "dental ai":               "AI",
-    "ai-powered":              "AI",
-    "ai powered":              "AI",
-    "videa":                   "AI",
-    "dentsply ai":             "AI",
-    "medtrics":                "AI",
-    "dental intel":            "AI",
-    "denti.ai":                "AI",
-    "second.opinion":          "AI",
-    "ai detection":            "AI",
-    "ai diagnostic":           "AI",
-    "ai-based":                "AI",
-    "dexis ai":                "AI",
-    # Intraoral Scanners
-    "intraoral scanner":       "Intraoral Scanners",
-    "digital impression":      "Intraoral Scanners",
-    "optical impression":      "Intraoral Scanners",
-    "itero":                   "Intraoral Scanners",
-    "3shape":                  "Intraoral Scanners",
-    "trios":                   "Intraoral Scanners",
-    "medit":                   "Intraoral Scanners",
-    "carestream dental":       "Intraoral Scanners",
-    "planmeca scanner":        "Intraoral Scanners",
-    "dental scanner":          "Intraoral Scanners",
-    "digital scan":            "Intraoral Scanners",
-    "no impressions":          "Intraoral Scanners",
-    "no messy impressions":    "Intraoral Scanners",
-    "true definition":         "Intraoral Scanners",
-    "wireless impression":     "Intraoral Scanners",
-    "digital intraoral":       "Intraoral Scanners",
+    # ── CEREC / Same-day crowns ───────────────────────────────────────────────
+    "cerec":                     "CEREC",
+    "same day crown":            "CEREC",
+    "same-day crown":            "CEREC",
+    "same day restoration":      "CEREC",
+    "same-day restoration":      "CEREC",
+    "single-visit crown":        "CEREC",
+    "single visit crown":        "CEREC",
+    "one visit crown":           "CEREC",
+    "one-visit crown":           "CEREC",
+    "in-office crown":           "CEREC",
+    "in office crown":           "CEREC",
+    "chairside crown":           "CEREC",
+    "chairside milling":         "CEREC",
+    "in-office milling":         "CEREC",
+    "milled crown":              "CEREC",
+    "cad/cam crown":             "CEREC",
+    "cadcam crown":              "CEREC",
+    "cad cam crown":             "CEREC",
+    "digital crown":             "CEREC",
+    "same-day dentistry":        "CEREC",
+    "same day dentistry":        "CEREC",
+    "e4d":                       "CEREC",
+    "omnicam":                   "CEREC",
+    # primescan is the CEREC scanner — listed under Intraoral Scanners too
+    # but milling/same-day crown context is the distinguisher; keep here
+    "cerec primescan":           "CEREC",
+    "cerec omnicam":             "CEREC",
+    "cerec mc":                  "CEREC",
+    "cerec ac":                  "CEREC",
+
+    # ── CBCT / 3D Imaging ─────────────────────────────────────────────────────
+    "cbct":                      "CBCT",
+    "cone beam":                 "CBCT",
+    "3d imaging":                "CBCT",
+    "3d x-ray":                  "CBCT",
+    "3d xray":                   "CBCT",
+    "3d x ray":                  "CBCT",
+    "3d scan":                   "CBCT",
+    "3d radiograph":             "CBCT",
+    "3d cone beam":              "CBCT",
+    "3d dental imaging":         "CBCT",
+    "3d dental scan":            "CBCT",
+    "volumetric tomography":     "CBCT",
+    "digital tomography":        "CBCT",
+    "i-cat":                     "CBCT",
+    "dental ct":                 "CBCT",
+    # planmeca removed (too generic — makes 2D X-rays and intraoral scanners too)
+    # use only CBCT-specific Planmeca model names:
+    "planmeca promax 3d":        "CBCT",
+    "planmeca cbct":             "CBCT",
+    "vatech cbct":               "CBCT",
+    "vatech green":              "CBCT",
+    "kavo cbct":                 "CBCT",
+    "acteon cbct":               "CBCT",
+    "galileos":                  "CBCT",
+    "prexion":                   "CBCT",
+    "cs 9600":                   "CBCT",
+    "cs9600":                    "CBCT",
+    "cs 9300":                   "CBCT",
+    "cs9300":                    "CBCT",
+    "orthophos":                 "CBCT",
+    "accuitomo":                 "CBCT",
+    "newtom":                    "CBCT",
+    "j. morita":                 "CBCT",
+    "3d tomograph":              "CBCT",
+
+    # ── Lasers ────────────────────────────────────────────────────────────────
+    "laser":                     "Lasers",
+    "waterlase":                 "Lasers",
+    "biolase":                   "Lasers",
+    "solea laser":               "Lasers",
+    "diode laser":               "Lasers",
+    "erbium laser":              "Lasers",
+    "fotona":                    "Lasers",
+    "lightwalker":               "Lasers",
+    "dental laser":              "Lasers",
+    "laser dentistry":           "Lasers",
+    "laser therapy":             "Lasers",
+    "laser treatment":           "Lasers",
+    "nv microlaser":             "Lasers",
+    "epic x laser":              "Lasers",
+    "soft tissue laser":         "Lasers",
+    "hard tissue laser":         "Lasers",
+
+    # ── AI ────────────────────────────────────────────────────────────────────
+    # " ai " (space-bounded) kept but supplemented with regex check below
+    "artificial intelligence":   "AI",
+    "overjet":                   "AI",
+    "pearl ai":                  "AI",
+    "diagnocat":                 "AI",
+    "dental ai":                 "AI",
+    "ai-powered":                "AI",
+    "ai powered":                "AI",
+    "ai-based":                  "AI",
+    "ai-assisted":               "AI",
+    "ai assisted":               "AI",
+    "ai detection":              "AI",
+    "ai diagnostic":             "AI",
+    "ai technology":             "AI",
+    "ai analysis":               "AI",
+    "videa":                     "AI",
+    "dexis ai":                  "AI",
+    "dentsply ai":               "AI",
+    "medtrics":                  "AI",
+    "dental intel":              "AI",
+    "denti.ai":                  "AI",
+    "second.opinion":            "AI",
+    "machine learning":          "AI",
+    "dexis clarity":             "AI",
+    "apteryx ai":                "AI",
+
+    # ── Intraoral Scanners ────────────────────────────────────────────────────
+    "intraoral scanner":         "Intraoral Scanners",
+    "digital impression":        "Intraoral Scanners",
+    "optical impression":        "Intraoral Scanners",
+    "no messy impressions":      "Intraoral Scanners",
+    "no more impressions":       "Intraoral Scanners",
+    "eliminate impressions":     "Intraoral Scanners",
+    "wireless impression":       "Intraoral Scanners",
+    "digital intraoral":         "Intraoral Scanners",
+    "itero":                     "Intraoral Scanners",
+    "itero element":             "Intraoral Scanners",
+    "3shape":                    "Intraoral Scanners",
+    "trios scanner":             "Intraoral Scanners",
+    "medit scanner":             "Intraoral Scanners",
+    "medit i-500":               "Intraoral Scanners",
+    "medit i500":                "Intraoral Scanners",
+    "primescan":                 "Intraoral Scanners",
+    "true definition scanner":   "Intraoral Scanners",
+    "3m true definition":        "Intraoral Scanners",
+    "planmeca emerald":          "Intraoral Scanners",
+    "carestream cs 3600":        "Intraoral Scanners",
+    "carestream cs3600":         "Intraoral Scanners",
+    # removed: "digital scan" (too broad), "planmeca scanner" (now specific models),
+    # "dental scanner" (too vague), "carestream dental" (too broad)
 }
 
 SOCIAL_PLATFORMS = ["facebook", "instagram", "tiktok", "linkedin"]
@@ -1511,6 +1635,107 @@ def get_instagram_stats_requests(url):
     return posts, followers
 
 
+def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
+    """
+    Fetch Instagram posts + followers via the internal web API (no login needed
+    for public profiles).  Uses curl_cffi TLS impersonation.
+    Returns (posts, followers) or ("", "") on failure.
+    """
+    if not ig_url or not _CFFI_AVAILABLE:
+        return "", ""
+    try:
+        path = urlparse(ig_url).path.strip("/")
+        username = path.split("/")[0] if path else ""
+        if not username:
+            return "", ""
+    except Exception:
+        return "", ""
+
+    api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    headers = {
+        "x-ig-app-id":      "936619743392459",
+        "User-Agent":       random.choice(_SOCIAL_UA_LIST),
+        "Accept":           "*/*",
+        "Accept-Language":  "en-US,en;q=0.9",
+        "Referer":          f"https://www.instagram.com/{username}/",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    try:
+        sess = cffi_requests.Session(impersonate=random.choice(_CFFI_IG_PROF))
+        r = sess.get(api_url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            user = data.get("data", {}).get("user", {})
+            if user:
+                posts_raw     = user.get("edge_owner_to_timeline_media", {}).get("count", "")
+                followers_raw = user.get("edge_followed_by", {}).get("count", "")
+                posts_str     = str(int(posts_raw))     if posts_raw     != "" else ""
+                followers_str = str(int(followers_raw)) if followers_raw != "" else ""
+                return posts_str, followers_str
+        log.debug(f"  IG API status {r.status_code} for @{username}")
+    except Exception as e:
+        log.debug(f"  IG API error for @{username}: {e}")
+    return "", ""
+
+
+def get_tiktok_stats(tt_url: str) -> tuple[str, str]:
+    """
+    Fetch TikTok video count + follower count via curl_cffi.
+    Parses the __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON embedded in the page.
+    Returns (videos, followers) or ("", "") on failure.
+    """
+    if not tt_url or not _CFFI_AVAILABLE:
+        return "", ""
+    try:
+        path = urlparse(tt_url).path.strip("/")
+        username = path.split("/")[0].lstrip("@")
+        if not username:
+            return "", ""
+    except Exception:
+        return "", ""
+
+    url = f"https://www.tiktok.com/@{username}"
+    headers = {
+        "User-Agent":      random.choice(_SOCIAL_UA_LIST),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Referer":         "https://www.tiktok.com/",
+    }
+    for profile in random.sample(_CFFI_PROFILES, len(_CFFI_PROFILES)):
+        try:
+            sess = cffi_requests.Session(impersonate=profile)
+            r = sess.get(url, headers=headers, timeout=20, allow_redirects=True)
+            if r.status_code != 200:
+                continue
+            html = r.text
+            # Method 1: embedded JSON
+            m = re.search(
+                r'id=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',
+                html, re.S
+            )
+            if m:
+                try:
+                    data  = json.loads(m.group(1))
+                    stats = data["__DEFAULT_SCOPE__"]["webapp.user-detail"]["userInfo"].get("stats", {})
+                    followers = str(int(stats["followerCount"])) if "followerCount" in stats else ""
+                    videos    = str(int(stats["videoCount"]))    if "videoCount"    in stats else ""
+                    if followers or videos:
+                        return videos, followers
+                except Exception:
+                    pass
+            # Method 2: raw regex fallback
+            mf = re.search(r'"followerCount"\s*:\s*(\d+)', html)
+            mv = re.search(r'"videoCount"\s*:\s*(\d+)', html)
+            followers = mf.group(1) if mf else ""
+            videos    = mv.group(1) if mv else ""
+            if followers or videos:
+                return videos, followers
+        except Exception as e:
+            log.debug(f"  TikTok error ({profile}): {e}")
+        time.sleep(0.5)
+    return "", ""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PLAYWRIGHT — Invisalign Tier
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2184,6 +2409,10 @@ def scrape_practice(row, pw_page=None):
         for keyword, tech_name in TECH_KEYWORDS.items():
             if keyword in _combined_tech:
                 tech_found.add(tech_name)
+        # AI: also check for standalone word "ai" with word boundaries
+        # (catches "AI technology", "using AI", "AI in dentistry" etc.)
+        if "AI" not in tech_found and re.search(r'\bai\b', _combined_tech):
+            tech_found.add("AI")
 
         result["cerec"]     = "X" if "CEREC"              in tech_found else ""
         result["cbct"]      = "X" if "CBCT"               in tech_found else ""
@@ -2206,17 +2435,20 @@ def scrape_practice(row, pw_page=None):
 
     if result["instagram_url"]:
         log.info("   Fetching Instagram stats…")
-        if pw_page and USE_PLAYWRIGHT:
-            _p, f = get_instagram_stats_pw(result["instagram_url"], pw_page)
-        else:
-            _p, f = get_instagram_stats_requests(result["instagram_url"])
-        result["instagram_followers"] = f
-        # instagram_posts intentionally not captured
+        ig_posts, ig_foll = get_instagram_stats_api(result["instagram_url"])
+        if not ig_posts and not ig_foll:
+            if pw_page and USE_PLAYWRIGHT:
+                ig_posts, ig_foll = get_instagram_stats_pw(result["instagram_url"], pw_page)
+            else:
+                ig_posts, ig_foll = get_instagram_stats_requests(result["instagram_url"])
+        result["instagram_posts"]     = ig_posts or "Not Found"
+        result["instagram_followers"] = ig_foll  or "Not Found"
 
     if result["tiktok_url"]:
-        log.info("   TikTok found — manual verification needed")
-        # tiktok_posts intentionally not captured
-        result["tiktok_followers"] = "See Profile"
+        log.info("   Fetching TikTok stats…")
+        tt_videos, tt_foll = get_tiktok_stats(result["tiktok_url"])
+        result["tiktok_posts"]     = tt_videos or "Not Found"
+        result["tiktok_followers"] = tt_foll   or "Not Found"
 
     if result["linkedin_url"]:
         log.info("   LinkedIn found — manual verification needed")
