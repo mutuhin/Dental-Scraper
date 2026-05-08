@@ -109,53 +109,59 @@ jobs:
           ARTIFACT="batch-${BATCH}"
           mkdir -p artifacts
 
-          echo "=== Searching scraper.yml runs for $ARTIFACT ==="
           ATTEMPT=0
-          for run_id in $(gh run list --workflow=scraper.yml --limit=50 \
-                            --json databaseId --jq '.[].databaseId'); do
-            TMP=$(mktemp -d)
-            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
-              FILES=$(find "$TMP/$ARTIFACT" -name "*.xlsx" 2>/dev/null)
-              if [ -n "$FILES" ]; then
-                ATTEMPT=$((ATTEMPT + 1))
-                DEST="artifacts/scraper_run${run_id}"
-                mkdir -p "$DEST"
-                cp -r "$TMP/$ARTIFACT/." "$DEST/"
-                ROWS=$(python3 -c "
-          import openpyxl, glob
-          total=0
-          for f in glob.glob('$DEST/*.xlsx'):
-              wb=openpyxl.load_workbook(f,read_only=True,data_only=True)
-              ws=wb.active
-              total+=sum(1 for r in ws.iter_rows(min_row=3,values_only=True) if r[0] is not None)
-              wb.close()
-          print(total)
-          " 2>/dev/null || echo "?")
-                echo "  Run $run_id → $DEST ($ROWS data rows)"
-              fi
-            fi
-          done
 
-          echo "=== Searching scrape_remaining.yml runs for $ARTIFACT ==="
-          for run_id in $(gh run list --workflow=scrape_remaining.yml --limit=50 \
-                            --json databaseId --jq '.[].databaseId'); do
-            TMP=$(mktemp -d)
+          # Helper: download one run's artifact and copy to DEST
+          try_download() {
+            local run_id="$1" dest_prefix="$2"
+            local TMP; TMP=$(mktemp -d)
             if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
-              FILES=$(find "$TMP/$ARTIFACT" -name "*.xlsx" 2>/dev/null)
+              local FILES
+              FILES=$(find "$TMP/$ARTIFACT" -name "*.xlsx" 2>/dev/null || true)
               if [ -n "$FILES" ]; then
                 ATTEMPT=$((ATTEMPT + 1))
-                DEST="artifacts/remaining_run${run_id}"
+                local DEST="artifacts/${dest_prefix}_run${run_id}"
                 mkdir -p "$DEST"
                 cp -r "$TMP/$ARTIFACT/." "$DEST/"
                 echo "  Run $run_id → $DEST"
               fi
             fi
+            rm -rf "$TMP"
+          }
+
+          # Strategy 1: search by workflow filename
+          echo "=== Searching scraper.yml runs for $ARTIFACT ==="
+          SCRAPER_RUNS=$(gh run list --workflow=scraper.yml --limit=50 \
+                           --json databaseId --jq '.[].databaseId' 2>/dev/null || echo "")
+          for run_id in $SCRAPER_RUNS; do
+            try_download "$run_id" "scraper"
+          done
+
+          echo "=== Searching scrape_remaining.yml runs for $ARTIFACT ==="
+          REMAINING_RUNS=$(gh run list --workflow=scrape_remaining.yml --limit=50 \
+                             --json databaseId --jq '.[].databaseId' 2>/dev/null || echo "")
+          for run_id in $REMAINING_RUNS; do
+            try_download "$run_id" "remaining"
+          done
+
+          # Strategy 2: use the API to directly find all artifacts named batch-N
+          # (catches runs from any workflow, regardless of filename)
+          echo "=== API search: all artifacts named $ARTIFACT ==="
+          API_RUN_IDS=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT}&per_page=100" \
+            --jq '.artifacts[].workflow_run.id' 2>/dev/null | sort -u || echo "")
+          for run_id in $API_RUN_IDS; do
+            # Skip if already downloaded by strategy 1
+            if ls artifacts/*/  2>/dev/null | grep -q "run${run_id}"; then
+              continue
+            fi
+            try_download "$run_id" "api"
           done
 
           echo ""
           echo "Total attempts found: $ATTEMPT"
           echo "All xlsx files:"
-          find artifacts -name "*.xlsx" | sort
+          find artifacts -name "*.xlsx" | sort || true
 
       # ── Merge all collected files into one ────────────────────────────────
       - name: Merge all attempts into one file
