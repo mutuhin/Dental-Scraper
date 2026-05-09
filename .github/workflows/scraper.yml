@@ -104,7 +104,28 @@ jobs:
           retention-days: 30
           overwrite: true
 
-      # ── 8. Pack and upload page cache so next re-run can resume ───────────
+      # ── 8. Deduplicate doctor names in scraped output ────────────────────
+      - name: Deduplicate doctor names
+        if: always()
+        run: |
+          FILE=$(ls batch_*.xlsx 2>/dev/null | grep -v deduped | head -1)
+          if [ -z "$FILE" ]; then
+            echo "No batch xlsx found — skipping dedup"
+            exit 0
+          fi
+          echo "Running dedup on: $FILE"
+          python3 reprocess.py --dedup "$FILE"
+
+      - name: Upload deduped output
+        if: ${{ hashFiles('batch_*_deduped.xlsx') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-deduped
+          path: batch_*_deduped.xlsx
+          retention-days: 30
+          overwrite: true
+
+      # ── 9. Pack and upload page cache so next re-run can resume ───────────
       - name: Upload page cache (for resume)
         if: always()
         run: |
