@@ -1,0 +1,236 @@
+name: Refresh Tech & Services from Cache
+
+# Downloads the page_cache artifact for a batch, re-extracts Technology in
+# Practice / Services / Testimonials using reprocess.py logic (no live
+# scraping), patches the deduped xlsx, and uploads:
+#   batch-N-refreshed   — updated xlsx
+#   batch-N-comparison  — before/after Excel report (changed cells highlighted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Batch number (1 = rows 1-100, 2 = rows 101-200 …)'
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
+          - '9'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '16'
+          - '17'
+          - '18'
+          - '19'
+          - '20'
+          - '21'
+          - '22'
+          - '23'
+          - '24'
+          - '25'
+          - '26'
+          - '27'
+          - '28'
+          - '29'
+          - '30'
+          - '31'
+          - '32'
+          - '33'
+          - '34'
+          - '35'
+          - '36'
+          - '37'
+          - '38'
+          - '39'
+          - '40'
+          - '41'
+          - '42'
+          - '43'
+          - '44'
+          - '45'
+          - '46'
+          - '47'
+          - '48'
+          - '49'
+          - '50'
+          - '51'
+          - '52'
+          - '53'
+          - '54'
+          - '55'
+          - '56'
+          - '57'
+          - '58'
+          - '59'
+          - '60'
+        default: '1'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests beautifulsoup4 openpyxl lxml
+
+      # ── Download batch-N-deduped (preferred) or batch-N (fallback) ───────
+      - name: Download deduped xlsx
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BATCH="${{ github.event.inputs.batch }}"
+          mkdir -p input_xlsx
+
+          for ARTIFACT_NAME in "batch-${BATCH}-deduped" "batch-${BATCH}"; do
+            echo "Trying artifact: $ARTIFACT_NAME"
+            PAGE=1
+            FOUND=0
+            while true; do
+              RESP=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100&page=${PAGE}" \
+                2>/dev/null || echo "")
+              [ -z "$RESP" ] && break
+              COUNT=$(echo "$RESP" | python3 -c \
+                "import sys,json; d=json.load(sys.stdin); print(len(d.get('artifacts',[])))" 2>/dev/null || echo "0")
+              [ "$COUNT" = "0" ] && break
+
+              ART_ID=$(echo "$RESP" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          arts = [a for a in d.get('artifacts',[]) if not a.get('expired', False)]
+          if arts:
+              print(arts[0]['id'])
+          " 2>/dev/null || echo "")
+
+              if [ -n "$ART_ID" ]; then
+                if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
+                     > input_xlsx/download.zip 2>/dev/null; then
+                  unzip -q input_xlsx/download.zip -d input_xlsx/ 2>/dev/null || true
+                  rm -f input_xlsx/download.zip
+                  XLSX=$(find input_xlsx -name "*.xlsx" | head -1)
+                  if [ -n "$XLSX" ]; then
+                    cp "$XLSX" input.xlsx
+                    echo "Downloaded: $XLSX (from $ARTIFACT_NAME)"
+                    FOUND=1
+                    break 2
+                  fi
+                fi
+              fi
+              [ "$COUNT" -lt 100 ] && break
+              PAGE=$((PAGE + 1))
+            done
+          done
+
+          if [ "$FOUND" = "0" ]; then
+            echo "ERROR: Could not find batch-${BATCH}-deduped or batch-${BATCH} artifact"
+            exit 1
+          fi
+
+      # ── Download and extract page_cache ──────────────────────────────────
+      - name: Download page cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BATCH="${{ github.event.inputs.batch }}"
+          ARTIFACT_NAME="batch-${BATCH}-cache"
+          mkdir -p page_cache_dl
+
+          PAGE=1
+          FOUND=0
+          while true; do
+            RESP=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100&page=${PAGE}" \
+              2>/dev/null || echo "")
+            [ -z "$RESP" ] && break
+            COUNT=$(echo "$RESP" | python3 -c \
+              "import sys,json; d=json.load(sys.stdin); print(len(d.get('artifacts',[])))" 2>/dev/null || echo "0")
+            [ "$COUNT" = "0" ] && break
+
+            ART_ID=$(echo "$RESP" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          arts = [a for a in d.get('artifacts',[]) if not a.get('expired', False)]
+          if arts:
+              print(arts[0]['id'])
+          " 2>/dev/null || echo "")
+
+            if [ -n "$ART_ID" ]; then
+              if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
+                   > page_cache_dl/download.zip 2>/dev/null; then
+                unzip -q page_cache_dl/download.zip -d page_cache_dl/ 2>/dev/null || true
+                rm -f page_cache_dl/download.zip
+                FOUND=1
+                break
+              fi
+            fi
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE + 1))
+          done
+
+          if [ "$FOUND" = "0" ]; then
+            echo "WARNING: No cache artifact found for batch ${BATCH}"
+          fi
+
+          # Handle tar.gz (from scraper.yml) or raw directory (legacy)
+          TARBALL=$(find page_cache_dl -name "page_cache.tar.gz" | head -1)
+          if [ -n "$TARBALL" ]; then
+            echo "Extracting $TARBALL"
+            tar -xzf "$TARBALL" -C .
+          else
+            echo "No tar.gz found — treating extracted contents as page_cache/"
+            if [ -d page_cache_dl/page_cache ]; then
+              mv page_cache_dl/page_cache page_cache
+            else
+              mv page_cache_dl page_cache
+            fi
+          fi
+
+          COUNT=$(find page_cache -name "manifest.json" 2>/dev/null | wc -l)
+          echo "Cache practices available: $COUNT"
+
+      # ── Re-extract and produce comparison ─────────────────────────────────
+      - name: Refresh Tech & Services from cache
+        run: |
+          python3 refresh_tech_services.py input.xlsx --cache-dir page_cache
+
+      # ── Upload refreshed xlsx ─────────────────────────────────────────────
+      - name: Upload refreshed xlsx
+        if: ${{ hashFiles('input_refreshed.xlsx') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-refreshed
+          path: input_refreshed.xlsx
+          retention-days: 30
+          overwrite: true
+
+      # ── Upload comparison report ──────────────────────────────────────────
+      - name: Upload comparison report
+        if: ${{ hashFiles('input_comparison.xlsx') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-comparison
+          path: input_comparison.xlsx
+          retention-days: 30
+          overwrite: true
