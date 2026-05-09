@@ -1888,9 +1888,8 @@ def scrape_practice(row, pw_page=None):
         # Patient experience
         "google_rating":         "Not Found",
         "google_reviews":        "Not Found",
-        # Yelp disabled — scraping blocked by Yelp
-        # "yelp_rating":         "Not Found",
-        # "yelp_reviews":        "Not Found",
+        "yelp_rating":           "Not Found",
+        "yelp_reviews":          "Not Found",
         "testimonials":          "0",
     }
 
@@ -2604,7 +2603,7 @@ def write_output(practices_data, output_path):
         (11, 22, "Social Media",            "green"),
         (23, 27, "Technology in Practice",  "purple"),
         (28, 39, "Services (# of Mentions)","orange"),
-        (40, 44, "Doctor Data & Reviews",   "grey"),
+        (40, 46, "Doctor Data & Reviews",   "grey"),
     ]
     for start, end, label, color in groups:
         ws.merge_cells(
@@ -2640,6 +2639,7 @@ def write_output(practices_data, output_path):
         "Associations / Memberships",
         "Doctor Specialty",
         "Google Reviews Ranking", "Total # of Google Reviews",
+        "Yelp Rating", "Total # of Yelp Reviews",
         "Testimonials (Number of)",
     ]
 
@@ -2648,7 +2648,7 @@ def write_output(practices_data, output_path):
     for c in range(11, 23): fill_col[c] = "lt_green"
     for c in range(23, 28): fill_col[c] = "lt_purple"
     for c in range(28, 40): fill_col[c] = "lt_orange"
-    for c in range(40, 45): fill_col[c] = "lt_grey"
+    for c in range(40, 47): fill_col[c] = "lt_grey"
 
     for col, hdr in enumerate(col_headers, 1):
         cell = ws.cell(2, col)
@@ -2735,6 +2735,7 @@ def write_output(practices_data, output_path):
                 doc["associations"],
                 doc["specialty"],
                 s["google_rating"],  s["google_reviews"],
+                s["yelp_rating"],    s["yelp_reviews"],
                 s["testimonials"],
             ]
 
@@ -2756,7 +2757,7 @@ def write_output(practices_data, output_path):
         23: 18, 24: 16, 25: 10, 26: 8,  27: 16,
         28: 14, 29: 26, 30: 14, 31: 10, 32: 10,
         33: 14, 34: 14, 35: 16, 36: 14, 37: 24, 38: 14, 39: 10,
-        40: 38, 41: 30, 42: 14, 43: 14, 44: 14,
+        40: 38, 41: 30, 42: 14, 43: 14, 44: 12, 45: 18, 46: 14,
     }
     for col, w in widths.items():
         ws.column_dimensions[get_column_letter(col)].width = w
@@ -2893,6 +2894,7 @@ EMPTY_SCRAPED = {
     "holistic": 0, "cancer_screening": 0,
     "doctors": [], "associations": "ERROR", "specialty": "ERROR",
     "google_rating": "ERROR", "google_reviews": "ERROR",
+    "yelp_rating": "ERROR", "yelp_reviews": "ERROR",
     "testimonials": "ERROR",
 }
 
