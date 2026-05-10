@@ -3005,7 +3005,9 @@ def main():
     log.info(f"\n🎉 Done!  {len(all_results)} practices scraped.")
     log.info(f"   Output: {OUTPUT_FILE}")
     if skipped:
+        skipped_indices = ", ".join(str(inp.get("Index", "?")) for inp, s in skipped)
         log.info(f"   Skipped: {len(skipped)} blocked/unreachable → {SKIPPED_DIR}/skipped_sites.xlsx")
+        log.info(f"   Skipped indices: {skipped_indices}")
 
 
 if __name__ == "__main__":
