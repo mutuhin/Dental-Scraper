@@ -28,6 +28,7 @@ import time
 import random
 import logging
 import warnings
+import shutil
 from urllib.parse import quote_plus
 
 import openpyxl
@@ -233,74 +234,48 @@ def launch_playwright():
 
 # ── Output writer ─────────────────────────────────────────────────────────────
 
-def write_output(practices: dict, results: dict):
-    wb = Workbook()
+def write_output(practices: dict, results: dict, source_file: str):
+    """
+    Patches the source deduped xlsx with Google ratings in cols 42 & 43,
+    preserving every other column (tech, services, testimonials, etc.).
+    Saves as google_ratings_output.xlsx so refresh_tech_services.py gets the
+    full 46-column file it expects.
+    """
+    shutil.copy(source_file, OUTPUT_FILE)
+    wb = openpyxl.load_workbook(OUTPUT_FILE)
     ws = wb.active
-    ws.title = "Google Ratings"
 
-    hdr_font  = Font(name="Arial", bold=True, size=10, color="FFFFFF")
-    hdr_fill  = PatternFill("solid", fgColor="1F4E79")
-    ctr       = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    lft       = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-    data_font = Font(name="Arial", size=10)
-    alt_fill  = PatternFill("solid", fgColor="DCE6F1")
-    found_fill = PatternFill("solid", fgColor="E2EFDA")   # light green for found ratings
-
-    headers = [
-        "#", "Practice Name", "Doctor Name", "Address",
-        "City", "State", "Zip", "Website",
-        "Google Reviews Ranking", "Total # of Google Reviews",
-        "Source Batch File",
-    ]
-    for c, h in enumerate(headers, 1):
-        cell = ws.cell(1, c, h)
-        cell.font      = hdr_font
-        cell.fill      = hdr_fill
-        cell.alignment = ctr
-
-    # Sort by original index so output order matches input
-    def _sort_key(item):
-        try:
-            return int(float(str(item[1].get("index") or 0)))
-        except Exception:
-            return 0
-
-    r_idx = 2
-    for key, p in sorted(practices.items(), key=_sort_key):
+    # Build index → (rating, count) lookup from results
+    index_ratings: dict = {}
+    for key, p in practices.items():
         rating, count = results.get(key, ("Not Found", ""))
-        row_fill_base = found_fill if rating not in ("Not Found", "") else None
-
         for row_data in p["rows"]:
-            rf = row_fill_base or (alt_fill if r_idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF"))
-            vals = [
-                row_data["index"],
-                row_data["practice"],
-                row_data["doctor"],
-                row_data["address"],
-                row_data["city"],
-                row_data["state"],
-                row_data["zip"],
-                row_data["website"],
-                rating,
-                count,
-                os.path.basename(row_data["file"]),
-            ]
-            for c_idx, val in enumerate(vals, 1):
-                cell           = ws.cell(r_idx, c_idx, val)
-                cell.font      = data_font
-                cell.fill      = rf
-                cell.alignment = lft if c_idx in (2, 3, 4, 8, 11) else ctr
-            r_idx += 1
+            try:
+                idx = str(int(float(str(row_data["index"]))))
+            except Exception:
+                idx = str(row_data["index"])
+            # Don't downgrade an already-found rating to "Not Found"
+            if idx not in index_ratings or index_ratings[idx][0] in ("Not Found", ""):
+                index_ratings[idx] = (rating, count)
 
-    col_widths = {1:6, 2:28, 3:26, 4:28, 5:14, 6:7, 7:8, 8:34, 9:16, 10:18, 11:30}
-    for col, w in col_widths.items():
-        ws.column_dimensions[get_column_letter(col)].width = w
-    ws.row_dimensions[1].height = 28
-    ws.freeze_panes = "A2"
+    patched = 0
+    for row in ws.iter_rows(min_row=DATA_START):
+        idx_val = row[C_INDEX - 1].value
+        if idx_val is None:
+            continue
+        try:
+            idx_str = str(int(float(str(idx_val))))
+        except Exception:
+            idx_str = str(idx_val)
+        if idx_str in index_ratings:
+            rating, count = index_ratings[idx_str]
+            row[C_GOOGLE_R - 1].value = rating
+            row[C_GOOGLE_N - 1].value = count
+            patched += 1
 
     wb.save(OUTPUT_FILE)
     found = sum(1 for r, c in results.values() if r not in ("Not Found", ""))
-    log.info(f"  Saved → {OUTPUT_FILE}  ({r_idx - 2} rows | {found}/{len(results)} rated)")
+    log.info(f"  Saved → {OUTPUT_FILE}  ({patched} rows patched | {found}/{len(results)} rated)")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -319,6 +294,9 @@ def run():
             "Make sure artifacts are downloaded before running this script."
         )
         return
+
+    source_file = files[0]   # deduped xlsx — will be patched with ratings
+    log.info(f"Source file (will be patched): {source_file}")
 
     practices = read_all_practices(files)
     if not practices:
@@ -395,7 +373,7 @@ def run():
 
             # Save progress every 10 practices
             if i % 10 == 0:
-                write_output(practices, results)
+                write_output(practices, results, source_file)
                 log.info(f"  💾 Progress saved ({i}/{total})")
                 # Batch pause (longer locally, shorter in CI)
                 if i < total:
@@ -410,7 +388,7 @@ def run():
         except Exception:
             pass
 
-    write_output(practices, results)
+    write_output(practices, results, source_file)
     found = sum(1 for r, c in results.values() if r not in ("Not Found", ""))
     log.info(f"\n🎉 Done — {found}/{total} ratings found  →  {OUTPUT_FILE}")
 
