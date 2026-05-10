@@ -170,3 +170,78 @@ jobs:
           path: google_ratings_output.xlsx
           retention-days: 30
           overwrite: true
+
+      # ── Download page cache from dental scraper workflow ──────────────────
+      - name: Download batch-${{ github.event.inputs.batch }}-cache
+        if: ${{ github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output.xlsx') != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BATCH="${{ github.event.inputs.batch }}"
+          ARTIFACT_NAME="batch-${BATCH}-cache"
+          mkdir -p cache_dl
+
+          RESP=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT_NAME}&per_page=10" \
+            2>/dev/null || echo "")
+
+          ART_ID=$(echo "$RESP" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          arts = [a for a in d.get('artifacts',[]) if not a.get('expired', False)]
+          if arts:
+              print(arts[0]['id'])
+          " 2>/dev/null || echo "")
+
+          if [ -z "$ART_ID" ]; then
+            echo "WARNING: No cache artifact found for batch-${BATCH} — skipping refresh step"
+            exit 0
+          fi
+
+          echo "Downloading cache artifact ID $ART_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
+            > cache_dl/download.zip
+          unzip -q cache_dl/download.zip -d cache_dl/
+          rm -f cache_dl/download.zip
+
+          # Handle tar.gz (scraper.yml) or raw directory (legacy)
+          TARBALL=$(find cache_dl -name "page_cache.tar.gz" | head -1)
+          if [ -n "$TARBALL" ]; then
+            echo "Extracting $TARBALL"
+            tar -xzf "$TARBALL" -C .
+          elif [ -d cache_dl/page_cache ]; then
+            mv cache_dl/page_cache page_cache
+          else
+            mv cache_dl page_cache
+          fi
+
+          COUNT=$(find page_cache -name "manifest.json" 2>/dev/null | wc -l)
+          echo "Cache practices available: $COUNT"
+
+      # ── Refresh Tech & Services from cache ────────────────────────────────
+      - name: Refresh Tech & Services from cache
+        if: ${{ github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output.xlsx') != '' }}
+        run: |
+          if [ ! -d page_cache ] || [ -z "$(find page_cache -name 'manifest.json' 2>/dev/null)" ]; then
+            echo "No page cache available — skipping refresh"
+            exit 0
+          fi
+          python3 refresh_tech_services.py google_ratings_output.xlsx --cache-dir page_cache
+
+      - name: Upload refreshed output
+        if: ${{ github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output_refreshed.xlsx') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-refreshed
+          path: google_ratings_output_refreshed.xlsx
+          retention-days: 30
+          overwrite: true
+
+      - name: Upload comparison report
+        if: ${{ github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output_comparison.xlsx') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.inputs.batch }}-comparison
+          path: google_ratings_output_comparison.xlsx
+          retention-days: 30
+          overwrite: true
