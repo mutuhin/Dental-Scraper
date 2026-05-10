@@ -88,7 +88,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install openpyxl
+        run: pip install openpyxl requests beautifulsoup4 lxml
 
       # ── Download the most recent batch-N artifact ─────────────────────────
       - name: Download batch-${{ github.event.inputs.batch }} artifact
