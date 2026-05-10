@@ -130,18 +130,21 @@ def _load_pages(folder: str) -> list:
 def _extract(pages: list) -> dict:
     """
     Extract tech / services / testimonials from cached pages.
-    Uses same caps as dental_scraper.py (body cap=5, full cap=3).
-    Reads ALL html files — not just manifest entries.
+    - Body text (nav stripped): cap=5 per page
+    - Full text + meta/JSON-LD/URL signals: cap=3 per page
+    - Takes MAX of body and full counts so nothing is missed
     """
     all_text = ""
-    per_page = []   # (body_text, full_text)
+    per_page = []   # (body_text, full_text_augmented)
     all_soups = []
 
-    for _ptype, _url, html in pages:
-        ft = ds.extract_text(html)
-        bt = ds.extract_body_text(html)
-        all_text += " " + ft
-        per_page.append((bt, ft))
+    for _ptype, url, html in pages:
+        ft  = ds.extract_text(html)
+        bt  = ds.extract_body_text(html)
+        aug = ds.extract_augmented_text(html, url)
+        ft_aug = ft + " " + aug
+        all_text += " " + ft_aug
+        per_page.append((bt, ft_aug))
         all_soups.append(BeautifulSoup(html, "lxml"))
 
     if not all_text.strip():
@@ -156,19 +159,20 @@ def _extract(pages: list) -> dict:
     if "AI" not in tf and re.search(r"\bai\b", all_text, re.I):
         tf.add("AI")
 
-    # ── Services (per-page, body-text primary / full-text fallback) ───────
+    # ── Services (per-page, body primary / full+augmented fallback) ───────
     svc_b = dict.fromkeys(set(ds.SERVICE_KEYWORDS.values()), 0)
     svc_f = dict.fromkeys(set(ds.SERVICE_KEYWORDS.values()), 0)
     seen_urls: set = set()
-    for i, (bt, ft) in enumerate(per_page):
+    for i, (bt, ft_aug) in enumerate(per_page):
         url_key = pages[i][1] or str(i)
         if url_key in seen_urls:
             continue
         seen_urls.add(url_key)
         for kw, cat in ds.SERVICE_KEYWORDS.items():
             svc_b[cat] += ds.count_keyword_capped(bt, kw, cap=5)
-            svc_f[cat] += ds.count_keyword_capped(ft, kw, cap=3)
-    svc = {cat: (svc_b[cat] if svc_b[cat] > 0 else svc_f[cat]) for cat in svc_b}
+            svc_f[cat] += ds.count_keyword_capped(ft_aug, kw, cap=3)
+    # Take MAX of body and full — ensures meta/JSON-LD/URL mentions aren't lost
+    svc = {cat: max(svc_b[cat], svc_f[cat]) for cat in svc_b}
 
     # ── Testimonials ──────────────────────────────────────────────────────
     seen_t, tt = set(), 0

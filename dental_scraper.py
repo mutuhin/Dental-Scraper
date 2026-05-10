@@ -29,7 +29,7 @@ import random
 import logging
 import warnings
 import unicodedata
-from urllib.parse import urljoin, urlparse, quote_plus
+from urllib.parse import urljoin, urlparse, quote_plus, unquote
 from requests.exceptions import SSLError as RequestsSSLError
 
 # Suppress urllib3 InsecureRequestWarning globally (we log our own warning)
@@ -612,6 +612,71 @@ def extract_body_text(html):
     )):
         tag.decompose()
     return soup.get_text(separator=" ", strip=True).lower()
+
+
+def extract_augmented_text(html: str, page_url: str = "") -> str:
+    """
+    Extract keyword-bearing text that extract_text() misses:
+      - <meta name="description"> / <meta name="keywords"> content
+      - JSON-LD structured data strings (schema.org availableService, etc.)
+      - URL path tokens from the page URL and all internal link hrefs
+      - title="" and aria-label="" attribute values
+
+    Returns lowercase string; safe to concatenate with extract_text() output.
+    """
+    import json as _json
+
+    soup = BeautifulSoup(html, "lxml")
+    parts: list = []
+
+    # Meta description / keywords
+    for m in soup.find_all("meta"):
+        name = (m.get("name") or m.get("property") or "").lower()
+        if any(x in name for x in ("description", "keyword", "og:description")):
+            content = m.get("content", "")
+            if content:
+                parts.append(content)
+
+    # JSON-LD — service/tech names often listed here
+    for script in soup.find_all("script", type=re.compile(r"application/ld\+json", re.I)):
+        try:
+            ld = _json.loads(script.string or "")
+            def _walk(obj):
+                if isinstance(obj, str):
+                    parts.append(obj)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        _walk(item)
+                elif isinstance(obj, dict):
+                    for v in obj.values():
+                        _walk(v)
+            _walk(ld)
+        except Exception:
+            pass
+
+    # Page URL path (e.g. /services/laser-dentistry → "laser dentistry")
+    if page_url:
+        path = unquote(urlparse(page_url).path)
+        parts.append(path.replace("-", " ").replace("/", " ").replace("_", " "))
+
+    # All internal link href paths
+    for a in soup.find_all("a", href=True):
+        href = str(a["href"])
+        if href.startswith("/") or "://" in href:
+            try:
+                path = unquote(urlparse(href).path)
+                parts.append(path.replace("-", " ").replace("/", " ").replace("_", " "))
+            except Exception:
+                pass
+
+    # title="" and aria-label="" attributes
+    for tag in soup.find_all(True):
+        for attr in ("title", "aria-label"):
+            val = tag.get(attr, "")
+            if val and isinstance(val, str) and len(val) > 2:
+                parts.append(val)
+
+    return " ".join(parts).lower()
 
 
 def count_keyword(text, keyword):
@@ -2355,7 +2420,9 @@ def scrape_practice(row, pw_page=None):
                 if os.path.exists(_fpath):
                     with open(_fpath, encoding="utf-8", errors="replace") as _f:
                         _raw = _f.read()
-                    _svc_pages.append((extract_body_text(_raw), extract_text(_raw)))
+                    # Full text augmented with meta/JSON-LD/URL signals
+                    _aug = extract_augmented_text(_raw, _page_url)
+                    _svc_pages.append((extract_body_text(_raw), extract_text(_raw) + " " + _aug))
         else:
             _svc_pages = [(all_text, all_text)]
 
@@ -2365,16 +2432,17 @@ def scrape_practice(row, pw_page=None):
             _svc_pages.append((all_text, all_text))
 
         # Primary count: body text only (nav stripped), capped at 5 per page
+        # Full text includes meta/JSON-LD/URL path signals, capped at 3 per page
         _svc_body = {k: 0 for k in svc_counts}
         _svc_full = {k: 0 for k in svc_counts}
         for _bt, _ft in _svc_pages:
             for keyword, category in SERVICE_KEYWORDS.items():
                 _svc_body[category] += count_keyword_capped(_bt, keyword, cap=5)
                 _svc_full[category] += count_keyword_capped(_ft, keyword, cap=3)
-        # If body-text gives 0 for a category, fall back to full-text count
-        # (handles rare sites that list services exclusively in nav/header)
+        # Take max of body and full text — never leave a category blank if
+        # the keyword appears anywhere (meta, URL, JSON-LD, or body text)
         for _cat in svc_counts:
-            svc_counts[_cat] = _svc_body[_cat] if _svc_body[_cat] > 0 else _svc_full[_cat]
+            svc_counts[_cat] = max(_svc_body[_cat], _svc_full[_cat])
 
         result["invisalign"]      = svc_counts["Invisalign"]
         result["clear_aligners"]  = svc_counts["Clear Aligners"]
@@ -2403,7 +2471,9 @@ def scrape_practice(row, pw_page=None):
                 if os.path.exists(_fpath):
                     with open(_fpath, encoding="utf-8", errors="replace") as _tf2:
                         _raw2 = _tf2.read()
-                    _tech_texts.append(extract_text(_raw2))
+                    # Include meta/JSON-LD/URL signals so tech in structured data isn't missed
+                    _aug2 = extract_augmented_text(_raw2, _pinfo.get("url", ""))
+                    _tech_texts.append(extract_text(_raw2) + " " + _aug2)
         _combined_tech = " ".join(_tech_texts)
         for keyword, tech_name in TECH_KEYWORDS.items():
             if keyword in _combined_tech:
