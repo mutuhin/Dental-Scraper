@@ -161,13 +161,140 @@ def _load_pages(folder: str) -> list:
     return pages
 
 
-# ── Live crawl (requests-based fallback) ──────────────────────────────────────
+# ── Live crawl ────────────────────────────────────────────────────────────────
+
+def _priority(path: str) -> int:
+    if _SVC_PATH_RE.search(path):
+        return 1
+    if _TEAM_PATH_RE.search(path):
+        return 2
+    if _TEST_PATH_RE.search(path):
+        return 3
+    return 9
+
+
+def _collect_links(html: str, base_url: str, base_netloc: str,
+                   visited: set, queue: list):
+    """Parse all useful internal links from an HTML page into the priority queue."""
+    from heapq import heappush
+    soup = BeautifulSoup(html, "lxml")
+    for a in soup.find_all("a", href=True):
+        href = str(a["href"]).split("#")[0].rstrip("/")
+        if not href or href.startswith("mailto") or href.startswith("tel"):
+            continue
+        try:
+            full = urljoin(base_url, href)
+            parsed = urlparse(full)
+            if parsed.netloc != base_netloc:
+                continue
+            p = _priority(parsed.path)
+            if p < 9 and full not in visited:
+                heappush(queue, (p, full))
+        except Exception:
+            pass
+
 
 def _live_crawl(website_url: str, practice_name: str = "") -> list:
     """
-    Requests-based BFS crawl of the practice website.
-    Fetches homepage + pages whose paths suggest services/tech/team/testimonials.
-    Returns list of ("live", url, html) triples — same shape as _load_pages().
+    Crawl the practice website to extract keyword-bearing HTML.
+    Tries Playwright first (renders JS — catches React/Vue/Wix/Squarespace sites).
+    Falls back to requests for static sites if Playwright is unavailable.
+    Returns list of ("live", url, html) triples.
+    """
+    if not website_url or website_url in ("None", "nan", "N/A", ""):
+        return []
+    if not website_url.startswith("http"):
+        website_url = "https://" + website_url
+    try:
+        base_netloc = urlparse(website_url).netloc
+    except Exception:
+        return []
+
+    pages = _live_crawl_playwright(website_url, base_netloc)
+    if not pages:
+        pages = _live_crawl_requests(website_url, base_netloc)
+    return pages
+
+
+def _live_crawl_playwright(website_url: str, base_netloc: str) -> list:
+    """
+    Playwright-based crawl — fully renders JS so React/Vue/Wix/Squarespace
+    sites show their actual content (services lists, technology pages, etc.).
+    Returns [] if Playwright is not installed.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return []
+
+    from heapq import heappush, heappop
+
+    pages   = []
+    visited = set()
+    queue   = []
+    heappush(queue, (0, website_url))
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox", "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage", "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            ctx = browser.new_context(
+                locale="en-US",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            page = ctx.new_page()
+            page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+            while queue and len(pages) < _LIVE_MAX_PAGES:
+                pri, url = heappop(queue)
+                url_norm = url.split("#")[0].rstrip("/") or url
+                if url_norm in visited:
+                    continue
+                visited.add(url_norm)
+
+                try:
+                    time.sleep(random.uniform(_LIVE_DELAY_MIN, _LIVE_DELAY_MAX))
+                    page.goto(url, timeout=20000,
+                              wait_until="domcontentloaded")
+                    # Extra wait for JS-rendered content to appear
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+                    html = page.content()
+                    if len(html) < 300:
+                        continue
+                except Exception as exc:
+                    log.debug("  PW fetch error %s: %s", url, exc)
+                    continue
+
+                pages.append(("live", url, html))
+                log.debug("  PW page %d: %s", len(pages), url)
+                _collect_links(html, url, base_netloc, visited, queue)
+
+            ctx.close()
+            browser.close()
+    except Exception as exc:
+        log.debug("  Playwright crawl error: %s", exc)
+
+    log.info("  live crawl (Playwright): %d pages from %s", len(pages), base_netloc)
+    return pages
+
+
+def _live_crawl_requests(website_url: str, base_netloc: str) -> list:
+    """
+    Requests-based crawl — fallback when Playwright is unavailable.
+    Works well for WordPress / static sites; misses JS-rendered content.
     """
     try:
         import requests as _req
@@ -175,33 +302,12 @@ def _live_crawl(website_url: str, practice_name: str = "") -> list:
         log.warning("requests not installed — skipping live crawl")
         return []
 
-    if not website_url or website_url in ("None", "nan", "N/A", ""):
-        return []
-    if not website_url.startswith("http"):
-        website_url = "https://" + website_url
-
-    try:
-        base_netloc = urlparse(website_url).netloc
-    except Exception:
-        return []
+    from heapq import heappush, heappop
 
     pages   = []
     visited = set()
-
-    # Priority queue: (priority, url)  — lower number = higher priority
-    # 0 = homepage, 1 = service/tech, 2 = team/about, 3 = testimonials, 9 = other
-    from heapq import heappush, heappop
-    queue = []
+    queue   = []
     heappush(queue, (0, website_url))
-
-    def _priority(path: str) -> int:
-        if _SVC_PATH_RE.search(path):
-            return 1
-        if _TEAM_PATH_RE.search(path):
-            return 2
-        if _TEST_PATH_RE.search(path):
-            return 3
-        return 9
 
     while queue and len(pages) < _LIVE_MAX_PAGES:
         pri, url = heappop(queue)
@@ -221,31 +327,14 @@ def _live_crawl(website_url: str, practice_name: str = "") -> list:
             if len(html) < 300:
                 continue
         except Exception as exc:
-            log.debug("  live crawl fetch error %s: %s", url, exc)
+            log.debug("  requests fetch error %s: %s", url, exc)
             continue
 
         pages.append(("live", url, html))
-        log.debug("  live page %d: %s", len(pages), url)
+        log.debug("  requests page %d: %s", len(pages), url)
+        _collect_links(html, url, base_netloc, visited, queue)
 
-        # Expand links from EVERY fetched page — ensures service sub-pages are found
-        soup = BeautifulSoup(html, "lxml")
-        for a in soup.find_all("a", href=True):
-            href = str(a["href"]).split("#")[0].rstrip("/")
-            if not href or href.startswith("mailto") or href.startswith("tel"):
-                continue
-            try:
-                full = urljoin(url, href)
-                parsed = urlparse(full)
-                if parsed.netloc != base_netloc:
-                    continue
-                path = parsed.path
-                p = _priority(path)
-                if p < 9 and full not in visited:   # only content-rich pages
-                    heappush(queue, (p, full))
-            except Exception:
-                continue
-
-    log.info("  live crawl: %d pages fetched from %s", len(pages), base_netloc)
+    log.info("  live crawl (requests): %d pages from %s", len(pages), base_netloc)
     return pages
 
 

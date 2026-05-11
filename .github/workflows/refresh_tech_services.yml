@@ -93,7 +93,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests beautifulsoup4 openpyxl lxml urllib3
+          pip install requests beautifulsoup4 openpyxl lxml urllib3 playwright
+
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
 
       # ── Download input xlsx ───────────────────────────────────────────────
       # Priority: google-ratings-batch-N (has ratings+dedup) → batch-N-deduped → batch-N

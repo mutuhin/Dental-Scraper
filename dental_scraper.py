@@ -292,6 +292,26 @@ TECH_KEYWORDS = {
     "cerec omnicam":             "CEREC",
     "cerec mc":                  "CEREC",
     "cerec ac":                  "CEREC",
+    # General crown service phrases — websites list "Dental Crowns" as a service
+    # without always naming the brand; map to CEREC since column = Same Day Crowns
+    "dental crowns":             "CEREC",
+    "dental crown":              "CEREC",
+    "tooth crowns":              "CEREC",
+    "tooth crown":               "CEREC",
+    "porcelain crown":           "CEREC",
+    "porcelain crowns":          "CEREC",
+    "zirconia crown":            "CEREC",
+    "zirconia crowns":           "CEREC",
+    "ceramic crown":             "CEREC",
+    "ceramic crowns":            "CEREC",
+    "crown restoration":         "CEREC",
+    "crown restorations":        "CEREC",
+    "crown and bridge":          "CEREC",
+    "crowns and bridges":        "CEREC",
+    "full crown":                "CEREC",
+    "crown placement":           "CEREC",
+    "crown procedure":           "CEREC",
+    "dental caps":               "CEREC",
 
     # ── CBCT / 3D Imaging ─────────────────────────────────────────────────────
     "cbct":                      "CBCT",
