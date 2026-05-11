@@ -109,11 +109,8 @@ jobs:
             exit 0
           fi
           sudo apt-get install -y openvpn curl
-          # Fetch a recommended US TCP server from NordVPN API
-          SERVER=$(curl -sf \
-            "https://api.nordvpn.com/v1/servers/recommendations?filters%5Bservers_technologies%5D%5Bidentifier%5D=openvpn_tcp&filters%5Bservers_groups%5D%5Bidentifier%5D=legacy_standard&limit=1" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['hostname'])" 2>/dev/null \
-            || echo "us9195.nordvpn.com")
+          # Fetch a recommended US TCP server from NordVPN API (country_id=228 = USA)
+          SERVER=$(curl -sf "https://api.nordvpn.com/v1/servers/recommendations?filters%5Bservers_technologies%5D%5Bidentifier%5D=openvpn_tcp&filters%5Bcountry_id%5D=228&limit=5" | python3 -c "import sys,json,random; d=json.load(sys.stdin); print(random.choice(d[:5])['hostname']) if d else print('us9195.nordvpn.com')" 2>/dev/null || echo "us9195.nordvpn.com")
           echo "Connecting to: $SERVER"
           wget -q "https://downloads.nordcdn.com/configs/files/ovpn_tcp/servers/${SERVER}.tcp.ovpn" \
             -O nordvpn.ovpn 2>/dev/null \
