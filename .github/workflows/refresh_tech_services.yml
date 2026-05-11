@@ -79,7 +79,7 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Checkout code
@@ -93,7 +93,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests beautifulsoup4 openpyxl lxml
+          pip install requests beautifulsoup4 openpyxl lxml urllib3
 
       # ── Download batch-N-deduped (preferred) or batch-N (fallback) ───────
       - name: Download deduped xlsx

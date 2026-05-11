@@ -1,16 +1,15 @@
 """
 refresh_tech_services.py
 ========================
-Re-extracts Technology in Practice, Services (# of Mentions), and Testimonials
-from the page_cache/ built by dental_scraper.py, then patches a batch xlsx file.
+Re-extracts Technology in Practice, Services (# of Mentions), Testimonials,
+and # of Hygienists from the page_cache/ AND via live requests crawl as a
+fallback when cache is missing or fields are still blank.
 
-Rules when writing back:
+Rules when writing back (NEVER REDUCE):
   • Tech fields  (CEREC/CBCT/Laser/AI/Intraoral) : keep "X" if EITHER old or new is "X"
   • Service counts (numeric)                      : keep MAX(old, new)
   • Dental Plan                                   : keep "Mentioned" if EITHER has it
-  • Testimonials                                  : keep MAX(old, new)
-
-Nothing is ever reduced. Only improves.
+  • Testimonials / Hygienists                     : keep MAX(old, new)
 
 Usage:
     python3 refresh_tech_services.py <batch_deduped.xlsx>
@@ -21,11 +20,14 @@ Outputs:
     <input>_comparison.xlsx  — before/after report (changed cells highlighted)
 """
 
-import os, sys, re, shutil, glob, logging
+import os, sys, re, shutil, glob, time, random, logging, warnings
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dental_scraper as ds
@@ -35,17 +37,19 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 # ── Column positions (1-based), matching dental_scraper.py ───────────────────
-C_IDX   = 1;  C_NAME  = 2
-C_CEREC = 23; C_CBCT  = 24; C_LASER = 25; C_AI   = 26; C_INTRA = 27
-C_INV   = 28  # col 29 = InvTier (skip)
-C_CLEAR = 30; C_VEN   = 31; C_IMPL  = 32; C_SMILE = 33; C_WHITE = 34
-C_SED   = 35; C_HOL   = 36; C_PLAN  = 37; C_CANC  = 38
-C_TESTI = 46
+C_IDX     = 1;  C_NAME    = 2;  C_WEBSITE = 8
+C_HYG     = 10
+C_CEREC   = 23; C_CBCT    = 24; C_LASER   = 25; C_AI      = 26; C_INTRA   = 27
+C_INV     = 28  # col 29 = InvTier (skip)
+C_CLEAR   = 30; C_VEN     = 31; C_IMPL    = 32; C_SMILE   = 33; C_WHITE   = 34
+C_SED     = 35; C_HOL     = 36; C_PLAN    = 37; C_CANC    = 38
+C_TESTI   = 46
 
 TECH_COLS = {C_CEREC, C_CBCT, C_LASER, C_AI, C_INTRA}
 
 # (xlsx_col, result_key, display_label)
 FIELD_MAP = [
+    (C_HYG,   "hygienists",      "# Hygienists"),
     (C_CEREC, "cerec",           "CEREC"),
     (C_CBCT,  "cbct",            "CBCT"),
     (C_LASER, "lasers",          "Lasers"),
@@ -66,11 +70,45 @@ FIELD_MAP = [
 
 DATA_START = 3
 
+# Testimonial block patterns — class, id, or data-* attributes
 _TEST_RE = re.compile(
     r"(testimonial|review|quote|patient.story|patient.review|"
     r"feedback|client.say|what.people|slider.item|carousel.item|"
-    r"swiper.slide|slick.slide|rating.block|star.review)", re.I
+    r"swiper.slide|slick.slide|rating.block|star.review|"
+    r"review.card|review.item|review.block|review.section|"
+    r"patient.comment|patient.feedback|google.review|"
+    r"review.widget|rating.widget|review.container)", re.I
 )
+
+# Paths that suggest service / technology / team pages worth crawling
+_SVC_PATH_RE  = re.compile(
+    r'/(service|treatment|technology|tech|procedure|offer|speciali|invisalign|'
+    r'implant|veneer|whitening|cerec|laser|sedation|cbct|intraoral|aligner)',
+    re.I,
+)
+_TEAM_PATH_RE = re.compile(
+    r'/(team|staff|about|hygien|doctor|provider|meet)',
+    re.I,
+)
+_TEST_PATH_RE = re.compile(
+    r'/(testimonial|review|patient|feedback)',
+    re.I,
+)
+
+# Live-crawl settings
+_LIVE_MAX_PAGES    = 10
+_LIVE_DELAY_MIN    = 1.2
+_LIVE_DELAY_MAX    = 3.0
+_LIVE_HEADERS      = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection":      "keep-alive",
+}
 
 
 # ── Cache loader ──────────────────────────────────────────────────────────────
@@ -89,13 +127,11 @@ def _find_cache_folder(idx: int, cache_dir: str):
 def _load_pages(folder: str) -> list:
     """
     Load all cached HTML pages for a practice.
-    Reads every .html file in the folder (not just manifest entries) to ensure
-    nothing is missed.
+    Reads every .html file in the folder (not just manifest entries).
     Returns list of (page_type, url, html_text).
     """
     import json
 
-    # Build url map from manifest
     url_map = {}
     manifest_path = os.path.join(folder, "manifest.json")
     if os.path.exists(manifest_path):
@@ -125,17 +161,104 @@ def _load_pages(folder: str) -> list:
     return pages
 
 
+# ── Live crawl (requests-based fallback) ──────────────────────────────────────
+
+def _live_crawl(website_url: str, practice_name: str = "") -> list:
+    """
+    Requests-based BFS crawl of the practice website.
+    Fetches homepage + pages whose paths suggest services/tech/team/testimonials.
+    Returns list of ("live", url, html) triples — same shape as _load_pages().
+    """
+    try:
+        import requests as _req
+    except ImportError:
+        log.warning("requests not installed — skipping live crawl")
+        return []
+
+    if not website_url or website_url in ("None", "nan", "N/A", ""):
+        return []
+    if not website_url.startswith("http"):
+        website_url = "https://" + website_url
+
+    try:
+        base_netloc = urlparse(website_url).netloc
+    except Exception:
+        return []
+
+    pages   = []
+    visited = set()
+
+    # Priority queue: (priority, url)  — lower number = higher priority
+    # 0 = homepage, 1 = service/tech, 2 = team/about, 3 = testimonials, 9 = other
+    from heapq import heappush, heappop
+    queue = []
+    heappush(queue, (0, website_url))
+
+    def _priority(path: str) -> int:
+        if _SVC_PATH_RE.search(path):
+            return 1
+        if _TEAM_PATH_RE.search(path):
+            return 2
+        if _TEST_PATH_RE.search(path):
+            return 3
+        return 9
+
+    while queue and len(pages) < _LIVE_MAX_PAGES:
+        pri, url = heappop(queue)
+        url_norm = url.split("#")[0].rstrip("/") or url
+        if url_norm in visited:
+            continue
+        visited.add(url_norm)
+
+        try:
+            time.sleep(random.uniform(_LIVE_DELAY_MIN, _LIVE_DELAY_MAX))
+            r = _req.get(url, headers=_LIVE_HEADERS, timeout=18,
+                         verify=False, allow_redirects=True)
+            ct = r.headers.get("content-type", "")
+            if r.status_code != 200 or "text/html" not in ct:
+                continue
+            html = r.text
+            if len(html) < 300:
+                continue
+        except Exception as exc:
+            log.debug("  live crawl fetch error %s: %s", url, exc)
+            continue
+
+        pages.append(("live", url, html))
+        log.debug("  live page %d: %s", len(pages), url)
+
+        # Only expand links from the first few pages to avoid rabbit holes
+        if len(pages) <= 3:
+            soup = BeautifulSoup(html, "lxml")
+            for a in soup.find_all("a", href=True):
+                href = str(a["href"]).split("#")[0].rstrip("/")
+                if not href or href.startswith("mailto") or href.startswith("tel"):
+                    continue
+                try:
+                    full = urljoin(url, href)
+                    parsed = urlparse(full)
+                    if parsed.netloc != base_netloc:
+                        continue
+                    path = parsed.path
+                    p = _priority(path)
+                    if p < 9 and full not in visited:   # only content-rich pages
+                        heappush(queue, (p, full))
+                except Exception:
+                    continue
+
+    log.info("  live crawl: %d pages fetched from %s", len(pages), base_netloc)
+    return pages
+
+
 # ── Extraction ────────────────────────────────────────────────────────────────
 
 def _extract(pages: list) -> dict:
     """
-    Extract tech / services / testimonials from cached pages.
-    - Body text (nav stripped): cap=5 per page
-    - Full text + meta/JSON-LD/URL signals: cap=3 per page
-    - Takes MAX of body and full counts so nothing is missed
+    Extract all target fields from a list of (ptype, url, html) pages.
+    Works on both cache pages and live-crawled pages.
     """
     all_text = ""
-    per_page = []   # (body_text, full_text_augmented)
+    per_page = []    # (body_text, full_text_augmented)
     all_soups = []
 
     for _ptype, url, html in pages:
@@ -155,7 +278,6 @@ def _extract(pages: list) -> dict:
     for kw, tn in ds.TECH_KEYWORDS.items():
         if kw in all_text:
             tf.add(tn)
-    # AI needs word-boundary to avoid false matches (e.g. "said", "await")
     if "AI" not in tf and re.search(r"\bai\b", all_text, re.I):
         tf.add("AI")
 
@@ -171,34 +293,77 @@ def _extract(pages: list) -> dict:
         for kw, cat in ds.SERVICE_KEYWORDS.items():
             svc_b[cat] += ds.count_keyword_capped(bt, kw, cap=5)
             svc_f[cat] += ds.count_keyword_capped(ft_aug, kw, cap=3)
-    # Take MAX of body and full — ensures meta/JSON-LD/URL mentions aren't lost
     svc = {cat: max(svc_b[cat], svc_f[cat]) for cat in svc_b}
 
     # ── Testimonials ──────────────────────────────────────────────────────
     seen_t, tt = set(), 0
     for soup in all_soups:
+        # By class / id attribute
         for blk in soup.find_all(
-            ["div", "section", "article", "blockquote", "li"], class_=_TEST_RE
+            ["div", "section", "article", "blockquote", "li", "p"],
+            class_=_TEST_RE,
         ):
-            k = blk.get_text(separator=" ", strip=True)[:80]
+            k = blk.get_text(separator=" ", strip=True)[:100]
             if k and k not in seen_t:
                 seen_t.add(k); tt += 1
+        # By data-* attributes
         for blk in soup.find_all(lambda t: any(
             _TEST_RE.search(str(v))
-            for k, v in t.attrs.items()
-            if k.startswith("data-") and isinstance(v, str)
+            for attr, v in t.attrs.items()
+            if attr.startswith("data-") and isinstance(v, str)
         )):
-            k = blk.get_text(separator=" ", strip=True)[:80]
+            k = blk.get_text(separator=" ", strip=True)[:100]
             if k and k not in seen_t:
                 seen_t.add(k); tt += 1
+        # By id attribute
+        for blk in soup.find_all(True, id=_TEST_RE):
+            k = blk.get_text(separator=" ", strip=True)[:100]
+            if k and k not in seen_t:
+                seen_t.add(k); tt += 1
+        # schema.org Review / itemprop
+        for blk in soup.find_all(True, attrs={"itemprop": re.compile(r"review", re.I)}):
+            k = blk.get_text(separator=" ", strip=True)[:100]
+            if k and k not in seen_t:
+                seen_t.add(k); tt += 1
+    # Fallback: plain <blockquote> tags
     if tt == 0:
         for soup in all_soups:
             for bq in soup.find_all("blockquote"):
-                k = bq.get_text(separator=" ", strip=True)[:80]
+                k = bq.get_text(separator=" ", strip=True)[:100]
                 if k and k not in seen_t:
                     seen_t.add(k); tt += 1
 
+    # ── Hygienists ────────────────────────────────────────────────────────
+    hyg = ""
+    # 1. Pattern search in all combined text
+    h = ds.find_hygienists(all_text)
+    if h:
+        hyg = h
+    # 2. Team page count: count distinct RDH / "dental hygienist" bios
+    if not hyg or hyg == "0":
+        team_soups = []
+        for i, (_p, url, _html) in enumerate(pages):
+            u = url.lower()
+            if any(kw in u for kw in ("team", "staff", "about", "hygien", "provider", "meet")):
+                team_soups.append(all_soups[i])
+        if not team_soups:
+            team_soups = all_soups  # try all pages if no explicit team page
+        rdh_names: set = set()
+        for soup in team_soups:
+            for card in soup.find_all(
+                ["div", "article", "li", "section"],
+                class_=re.compile(r"(team|staff|provider|member|doctor|bio|card)", re.I),
+            ):
+                text = card.get_text(separator=" ", strip=True)
+                if re.search(r"\bRDH\b|registered dental hygienist|dental hygienist", text, re.I):
+                    name_m = re.search(r"([A-Z][a-z]+ [A-Z][a-z]+)", text)
+                    key = name_m.group(1) if name_m else text[:40]
+                    rdh_names.add(key)
+        if rdh_names:
+            hyg = str(len(rdh_names))
+
     return {
+        C_HYG:   hyg,
         C_CEREC: "X" if "CEREC"              in tf else "",
         C_CBCT:  "X" if "CBCT"               in tf else "",
         C_LASER: "X" if "Lasers"             in tf else "",
@@ -222,11 +387,9 @@ def _extract(pages: list) -> dict:
 
 def _merge(col: int, old, new):
     """
-    Combine old (xlsx) value with new (cache-extracted) value.
-    Never reduces: returns the better of the two.
+    Combine two values. Never reduces — always keeps the better/larger value.
     """
     if col in TECH_COLS:
-        # Keep "X" if either side has it
         return "X" if (str(old or "").strip() == "X" or str(new or "").strip() == "X") else ""
 
     if col == C_PLAN:
@@ -235,7 +398,29 @@ def _merge(col: int, old, new):
             str(new or "").strip() == "Mentioned"
         ) else ""
 
-    # Numeric fields — take max
+    if col == C_HYG:
+        def _n(v):
+            try:
+                n = int(str(v or "").strip())
+                return n if n >= 0 else -1
+            except Exception:
+                return -1
+        on, nn = _n(old), _n(new)
+        if on >= 0 and nn >= 0:
+            return str(max(on, nn))
+        if on >= 0:
+            return str(on)
+        if nn >= 0:
+            return str(nn)
+        # Neither is a number — keep any non-blank non-N/A value
+        os_ = str(old or "").strip()
+        ns_ = str(new or "").strip()
+        for v in (os_, ns_):
+            if v and v not in ("N/A", "None", "ERROR", "Not Found"):
+                return v
+        return os_ or ns_
+
+    # Numeric fields (service counts, testimonials) — take max
     try:
         old_n = int(str(old or 0).replace(",", ""))
     except (ValueError, TypeError):
@@ -245,6 +430,19 @@ def _merge(col: int, old, new):
     except (ValueError, TypeError):
         new_n = 0
     return max(old_n, new_n)
+
+
+def _is_all_blank(extracted: dict) -> bool:
+    """Return True if all key fields are empty/zero — live crawl is needed."""
+    tech_blank = all(extracted.get(c, "") == "" for c in TECH_COLS)
+    svc_zero   = all(
+        extracted.get(c, 0) in (0, "", "0")
+        for c in (C_INV, C_CLEAR, C_VEN, C_IMPL, C_SMILE, C_WHITE, C_SED, C_HOL, C_CANC)
+        if c != C_PLAN
+    )
+    plan_blank = extracted.get(C_PLAN, "") == ""
+    testi_zero = extracted.get(C_TESTI, "0") in ("0", "", 0)
+    return tech_blank and svc_zero and plan_blank and testi_zero
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -271,9 +469,10 @@ def refresh(input_xlsx: str, cache_dir: str = "page_cache"):
     wb = openpyxl.load_workbook(out_path, data_only=True)
     ws = wb.active
 
-    idx_rows   = {}   # idx -> [row_num, ...]
-    idx_before = {}   # idx -> {col: old_value}
-    idx_name   = {}   # idx -> practice name
+    idx_rows    = {}   # idx -> [row_num, ...]
+    idx_before  = {}   # idx -> {col: old_value}
+    idx_name    = {}   # idx -> practice name
+    idx_website = {}   # idx -> website url
 
     for row in ws.iter_rows(min_row=DATA_START, values_only=False):
         raw = row[C_IDX - 1].value
@@ -286,53 +485,79 @@ def refresh(input_xlsx: str, cache_dir: str = "page_cache"):
         rn = row[0].row
         idx_rows.setdefault(idx, []).append(rn)
         if idx not in idx_before:
-            idx_before[idx] = {col: ws.cell(rn, col).value for col, _, _ in FIELD_MAP}
-            idx_name[idx]   = str(row[C_NAME - 1].value or "")
+            idx_before[idx]  = {col: ws.cell(rn, col).value for col, _, _ in FIELD_MAP}
+            idx_name[idx]    = str(row[C_NAME    - 1].value or "")
+            website_raw      = str(row[C_WEBSITE - 1].value or "").strip()
+            idx_website[idx] = website_raw if website_raw not in ("None", "nan", "") else ""
 
     wb.close()
     log.info("Practices in xlsx: %d", len(idx_rows))
 
-    # ── Extract from cache ─────────────────────────────────────────────────
-    merged_vals = {}   # idx -> {col: merged_value}
-    n_found = n_missing = 0
+    # ── Extract per practice ───────────────────────────────────────────────
+    merged_vals = {}
+    n_cache = n_live = n_missing = 0
 
     for idx in sorted(idx_rows):
+        name = idx_name.get(idx, "")
+        url  = idx_website.get(idx, "")
+
+        # ── 1. Cache ──────────────────────────────────────────────────────
+        cache_extracted = {}
         folder = _find_cache_folder(idx, cache_dir)
-        if not folder:
+        if folder:
+            pages = _load_pages(folder)
+            if pages:
+                cache_extracted = _extract(pages)
+                n_cache += 1
+
+        # ── 2. Live crawl fallback ────────────────────────────────────────
+        # Trigger when: no cache at all, OR cache gave all-blank results,
+        # OR hygienist is still missing and a URL is available.
+        live_extracted = {}
+        need_live = url and (
+            not cache_extracted or
+            _is_all_blank(cache_extracted) or
+            not cache_extracted.get(C_HYG, "")
+        )
+        if need_live:
+            log.info("  [%03d] %-28s  → live crawl (%s)",
+                     idx, name[:28], "no cache" if not cache_extracted else "fields blank")
+            live_pages = _live_crawl(url, name)
+            if live_pages:
+                live_extracted = _extract(live_pages)
+                n_live += 1
+
+        # ── 3. Merge cache + live ─────────────────────────────────────────
+        if not cache_extracted and not live_extracted:
             n_missing += 1
             continue
 
-        pages = _load_pages(folder)
-        if not pages:
-            n_missing += 1
-            continue
-
-        extracted = _extract(pages)
-        if not extracted:
-            n_missing += 1
-            continue
-
-        n_found += 1
-        old = idx_before[idx]
-
-        # Merge: take best of old and new
-        merged = {}
+        best: dict = {}
         for col, _, _ in FIELD_MAP:
-            merged[col] = _merge(col, old.get(col), extracted.get(col))
+            best[col] = _merge(col,
+                               cache_extracted.get(col),
+                               live_extracted.get(col))
+
+        # ── 4. Merge best with existing xlsx values ───────────────────────
+        old = idx_before[idx]
+        merged: dict = {}
+        for col, _, _ in FIELD_MAP:
+            merged[col] = _merge(col, old.get(col), best.get(col))
         merged_vals[idx] = merged
 
-        log.info("  [%03d] %-30s  CEREC=%-2s  Inv=%-3s  Impl=%-3s  Testi=%s  pages=%d",
-                 idx, idx_name[idx][:30],
+        log.info("  [%03d] %-28s  CEREC=%-2s  Inv=%-3s  Impl=%-3s  Hyg=%-3s  Testi=%s",
+                 idx, name[:28],
                  merged[C_CEREC] or "-",
                  merged[C_INV],
                  merged[C_IMPL],
-                 merged[C_TESTI],
-                 len(pages))
+                 merged.get(C_HYG, "-") or "-",
+                 merged[C_TESTI])
 
-    log.info("Cache found: %d / %d  (no cache: %d)", n_found, len(idx_rows), n_missing)
+    log.info("Cache: %d  Live: %d  No data: %d  /  %d total",
+             n_cache, n_live, n_missing, len(idx_rows))
 
     if not merged_vals:
-        log.warning("No cache data — nothing to patch.")
+        log.warning("No data extracted — nothing to patch.")
         return out_path, None
 
     # ── Write merged values ────────────────────────────────────────────────
@@ -375,7 +600,7 @@ def _write_comparison(path, idx_rows, idx_name, before, after):
     labels = [lbl for _, _, lbl in FIELD_MAP]
     n      = len(FIELD_MAP)
 
-    # Row 1: group labels
+    # Row 1: group headers
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
     ws.cell(1, 1, "Practice").font = HDR; ws.cell(1, 1).alignment = ctr
 
@@ -425,7 +650,7 @@ def _write_comparison(path, idx_rows, idx_name, before, after):
 
         r += 1
 
-    # Widths
+    # Column widths
     ws.column_dimensions["A"].width = 7
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 10
