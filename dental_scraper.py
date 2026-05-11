@@ -273,6 +273,14 @@ TECH_KEYWORDS = {
     "cad/cam crown":             "CEREC",
     "cadcam crown":              "CEREC",
     "cad cam crown":             "CEREC",
+    "cad/cam":                   "CEREC",
+    "cad cam":                   "CEREC",
+    "chairside restoration":     "CEREC",
+    "one appointment crown":     "CEREC",
+    "one-appointment crown":     "CEREC",
+    "crown in one":              "CEREC",
+    "crown in a day":            "CEREC",
+    "crown same day":            "CEREC",
     "digital crown":             "CEREC",
     "same-day dentistry":        "CEREC",
     "same day dentistry":        "CEREC",
@@ -288,6 +296,11 @@ TECH_KEYWORDS = {
     # ── CBCT / 3D Imaging ─────────────────────────────────────────────────────
     "cbct":                      "CBCT",
     "cone beam":                 "CBCT",
+    "cone-beam":                 "CBCT",
+    "3d scanning":               "CBCT",
+    "3-d imaging":               "CBCT",
+    "3-d scan":                  "CBCT",
+    "dental 3d":                 "CBCT",
     "3d imaging":                "CBCT",
     "3d x-ray":                  "CBCT",
     "3d xray":                   "CBCT",
@@ -338,6 +351,14 @@ TECH_KEYWORDS = {
     "epic x laser":              "Lasers",
     "soft tissue laser":         "Lasers",
     "hard tissue laser":         "Lasers",
+    "lanap":                     "Lasers",
+    "lightscalpel":              "Lasers",
+    "periodontal laser":         "Lasers",
+    "gum laser":                 "Lasers",
+    "laser gum":                 "Lasers",
+    "laser periodon":            "Lasers",
+    "laser whitening":           "Lasers",
+    "laser surgery":             "Lasers",
 
     # ── AI ────────────────────────────────────────────────────────────────────
     # " ai " (space-bounded) kept but supplemented with regex check below
@@ -368,13 +389,22 @@ TECH_KEYWORDS = {
 
     # ── Intraoral Scanners ────────────────────────────────────────────────────
     "intraoral scanner":         "Intraoral Scanners",
+    "intra-oral scanner":        "Intraoral Scanners",
     "digital impression":        "Intraoral Scanners",
+    "digital impressions":       "Intraoral Scanners",
     "optical impression":        "Intraoral Scanners",
     "no messy impressions":      "Intraoral Scanners",
     "no more impressions":       "Intraoral Scanners",
+    "no impressions":            "Intraoral Scanners",
     "eliminate impressions":     "Intraoral Scanners",
+    "skip the impressions":      "Intraoral Scanners",
+    "without impressions":       "Intraoral Scanners",
     "wireless impression":       "Intraoral Scanners",
     "digital intraoral":         "Intraoral Scanners",
+    "3d intraoral":              "Intraoral Scanners",
+    "digital dental scan":       "Intraoral Scanners",
+    "trios":                     "Intraoral Scanners",
+    "medit":                     "Intraoral Scanners",
     "itero":                     "Intraoral Scanners",
     "itero element":             "Intraoral Scanners",
     "3shape":                    "Intraoral Scanners",
@@ -669,12 +699,20 @@ def extract_augmented_text(html: str, page_url: str = "") -> str:
             except Exception:
                 pass
 
-    # title="" and aria-label="" attributes
+    # title, aria-label, alt, placeholder attributes — all carry keyword-rich text
     for tag in soup.find_all(True):
-        for attr in ("title", "aria-label"):
+        for attr in ("title", "aria-label", "alt", "placeholder", "data-title", "data-label"):
             val = tag.get(attr, "")
             if val and isinstance(val, str) and len(val) > 2:
                 parts.append(val)
+
+    # og:title / og:keywords meta (description already covered above)
+    for m in soup.find_all("meta"):
+        prop = (m.get("property") or "").lower()
+        if prop in ("og:title", "og:keywords", "twitter:title", "twitter:description"):
+            content = m.get("content", "")
+            if content:
+                parts.append(content)
 
     return " ".join(parts).lower()
 
@@ -2475,11 +2513,12 @@ def scrape_practice(row, pw_page=None):
                     _aug2 = extract_augmented_text(_raw2, _pinfo.get("url", ""))
                     _tech_texts.append(extract_text(_raw2) + " " + _aug2)
         _combined_tech = " ".join(_tech_texts)
+        # Normalize hyphens → spaces so "cone-beam" matches "cone beam" keyword etc.
+        _combined_tech_n = _combined_tech.replace("-", " ")
         for keyword, tech_name in TECH_KEYWORDS.items():
-            if keyword in _combined_tech:
+            if keyword in _combined_tech_n:
                 tech_found.add(tech_name)
         # AI: also check for standalone word "ai" with word boundaries
-        # (catches "AI technology", "using AI", "AI in dentistry" etc.)
         if "AI" not in tech_found and re.search(r'\bai\b', _combined_tech):
             tech_found.add("AI")
 

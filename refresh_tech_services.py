@@ -227,24 +227,23 @@ def _live_crawl(website_url: str, practice_name: str = "") -> list:
         pages.append(("live", url, html))
         log.debug("  live page %d: %s", len(pages), url)
 
-        # Only expand links from the first few pages to avoid rabbit holes
-        if len(pages) <= 3:
-            soup = BeautifulSoup(html, "lxml")
-            for a in soup.find_all("a", href=True):
-                href = str(a["href"]).split("#")[0].rstrip("/")
-                if not href or href.startswith("mailto") or href.startswith("tel"):
+        # Expand links from EVERY fetched page — ensures service sub-pages are found
+        soup = BeautifulSoup(html, "lxml")
+        for a in soup.find_all("a", href=True):
+            href = str(a["href"]).split("#")[0].rstrip("/")
+            if not href or href.startswith("mailto") or href.startswith("tel"):
+                continue
+            try:
+                full = urljoin(url, href)
+                parsed = urlparse(full)
+                if parsed.netloc != base_netloc:
                     continue
-                try:
-                    full = urljoin(url, href)
-                    parsed = urlparse(full)
-                    if parsed.netloc != base_netloc:
-                        continue
-                    path = parsed.path
-                    p = _priority(path)
-                    if p < 9 and full not in visited:   # only content-rich pages
-                        heappush(queue, (p, full))
-                except Exception:
-                    continue
+                path = parsed.path
+                p = _priority(path)
+                if p < 9 and full not in visited:   # only content-rich pages
+                    heappush(queue, (p, full))
+            except Exception:
+                continue
 
     log.info("  live crawl: %d pages fetched from %s", len(pages), base_netloc)
     return pages
@@ -274,9 +273,11 @@ def _extract(pages: list) -> dict:
         return {}
 
     # ── Technology ────────────────────────────────────────────────────────
+    # Normalize hyphens → spaces so "cone-beam" matches keyword "cone beam" etc.
+    all_text_n = all_text.replace("-", " ")
     tf = set()
     for kw, tn in ds.TECH_KEYWORDS.items():
-        if kw in all_text:
+        if kw in all_text_n:
             tf.add(tn)
     if "AI" not in tf and re.search(r"\bai\b", all_text, re.I):
         tf.add("AI")
@@ -432,17 +433,17 @@ def _merge(col: int, old, new):
     return max(old_n, new_n)
 
 
-def _is_all_blank(extracted: dict) -> bool:
-    """Return True if all key fields are empty/zero — live crawl is needed."""
-    tech_blank = all(extracted.get(c, "") == "" for c in TECH_COLS)
-    svc_zero   = all(
-        extracted.get(c, 0) in (0, "", "0")
-        for c in (C_INV, C_CLEAR, C_VEN, C_IMPL, C_SMILE, C_WHITE, C_SED, C_HOL, C_CANC)
-        if c != C_PLAN
-    )
-    plan_blank = extracted.get(C_PLAN, "") == ""
-    testi_zero = extracted.get(C_TESTI, "0") in ("0", "", 0)
-    return tech_blank and svc_zero and plan_blank and testi_zero
+def _needs_live_crawl(extracted: dict) -> bool:
+    """
+    Return True if any important field is still blank/zero after cache extraction.
+    We always supplement with live crawl when ANY tech field or Invisalign is missing
+    — not just when everything is blank.
+    """
+    any_tech_blank = any(extracted.get(c, "") == "" for c in TECH_COLS)
+    inv_zero       = extracted.get(C_INV, 0) in (0, "", "0")
+    hyg_blank      = not extracted.get(C_HYG, "")
+    testi_zero     = extracted.get(C_TESTI, "0") in ("0", "", 0)
+    return any_tech_blank or inv_zero or hyg_blank or testi_zero
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -516,8 +517,7 @@ def refresh(input_xlsx: str, cache_dir: str = "page_cache"):
         live_extracted = {}
         need_live = url and (
             not cache_extracted or
-            _is_all_blank(cache_extracted) or
-            not cache_extracted.get(C_HYG, "")
+            _needs_live_crawl(cache_extracted)
         )
         if need_live:
             log.info("  [%03d] %-28s  → live crawl (%s)",
