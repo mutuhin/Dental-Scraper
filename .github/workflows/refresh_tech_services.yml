@@ -95,15 +95,16 @@ jobs:
           pip install --upgrade pip
           pip install requests beautifulsoup4 openpyxl lxml urllib3
 
-      # ── Download batch-N-deduped (preferred) or batch-N (fallback) ───────
-      - name: Download deduped xlsx
+      # ── Download input xlsx ───────────────────────────────────────────────
+      # Priority: google-ratings-batch-N (has ratings+dedup) → batch-N-deduped → batch-N
+      - name: Download input xlsx
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           BATCH="${{ github.event.inputs.batch }}"
           mkdir -p input_xlsx
 
-          for ARTIFACT_NAME in "batch-${BATCH}-deduped" "batch-${BATCH}"; do
+          for ARTIFACT_NAME in "google-ratings-batch-${BATCH}" "batch-${BATCH}-deduped" "batch-${BATCH}"; do
             echo "Trying artifact: $ARTIFACT_NAME"
             PAGE=1
             FOUND=0
@@ -144,7 +145,7 @@ jobs:
           done
 
           if [ "$FOUND" = "0" ]; then
-            echo "ERROR: Could not find batch-${BATCH}-deduped or batch-${BATCH} artifact"
+            echo "ERROR: Could not find google-ratings-batch-${BATCH}, batch-${BATCH}-deduped, or batch-${BATCH} artifact"
             exit 1
           fi
 
