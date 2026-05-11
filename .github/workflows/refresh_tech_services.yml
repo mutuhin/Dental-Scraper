@@ -98,6 +98,34 @@ jobs:
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
+      # ── Connect NordVPN (optional — requires NORDVPN_SERVICE_USER secret) ─
+      - name: Connect NordVPN
+        env:
+          NORDVPN_USER: ${{ secrets.NORDVPN_SERVICE_USER }}
+          NORDVPN_PASS: ${{ secrets.NORDVPN_SERVICE_PASS }}
+        run: |
+          if [ -z "$NORDVPN_USER" ]; then
+            echo "NordVPN credentials not configured — skipping VPN"
+            exit 0
+          fi
+          sudo apt-get install -y openvpn curl
+          # Fetch a recommended US TCP server from NordVPN API
+          SERVER=$(curl -sf \
+            "https://api.nordvpn.com/v1/servers/recommendations?filters%5Bservers_technologies%5D%5Bidentifier%5D=openvpn_tcp&filters%5Bservers_groups%5D%5Bidentifier%5D=legacy_standard&limit=1" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['hostname'])" 2>/dev/null \
+            || echo "us9195.nordvpn.com")
+          echo "Connecting to: $SERVER"
+          wget -q "https://downloads.nordcdn.com/configs/files/ovpn_tcp/servers/${SERVER}.tcp.ovpn" \
+            -O nordvpn.ovpn 2>/dev/null \
+            || wget -q "https://downloads.nordcdn.com/configs/files/ovpn_tcp/servers/us9195.nordvpn.com.tcp.ovpn" \
+               -O nordvpn.ovpn
+          printf '%s\n%s\n' "$NORDVPN_USER" "$NORDVPN_PASS" > vpn_auth.txt
+          sudo openvpn --config nordvpn.ovpn --auth-user-pass vpn_auth.txt \
+            --daemon --log /tmp/vpn.log
+          sleep 12
+          NEW_IP=$(curl -sf https://api.ipify.org || echo "unavailable")
+          echo "Connected — public IP: $NEW_IP"
+
       # ── Download input xlsx ───────────────────────────────────────────────
       # Priority: google-ratings-batch-N (has ratings+dedup) → batch-N-deduped → batch-N
       - name: Download input xlsx
