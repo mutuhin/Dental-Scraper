@@ -177,6 +177,7 @@ def _collect_links(html: str, base_url: str, base_netloc: str,
                    visited: set, queue: list):
     """Parse all useful internal links from an HTML page into the priority queue."""
     from heapq import heappush
+    root = base_netloc.lower().removeprefix("www.")
     soup = BeautifulSoup(html, "lxml")
     for a in soup.find_all("a", href=True):
         href = str(a["href"]).split("#")[0].rstrip("/")
@@ -185,7 +186,7 @@ def _collect_links(html: str, base_url: str, base_netloc: str,
         try:
             full = urljoin(base_url, href)
             parsed = urlparse(full)
-            if parsed.netloc != base_netloc:
+            if parsed.netloc.lower().removeprefix("www.") != root:
                 continue
             p = _priority(parsed.path)
             if p < 9 and full not in visited:
@@ -269,6 +270,25 @@ def _live_crawl_playwright(website_url: str, base_netloc: str) -> list:
                     # Extra wait for JS-rendered content to appear
                     try:
                         page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+                    # Scroll in 300 px steps so IntersectionObserver fires for
+                    # every Wix/Squarespace/React lazy-loaded section
+                    try:
+                        page.evaluate("""
+                            (async () => {
+                                const delay = ms => new Promise(r => setTimeout(r, ms));
+                                const step = 300;
+                                let pos = 0;
+                                while (pos < document.body.scrollHeight + step) {
+                                    window.scrollTo(0, pos);
+                                    await delay(180);
+                                    pos += step;
+                                }
+                                await delay(1200);
+                            })()
+                        """)
+                        time.sleep(2.5)
                     except Exception:
                         pass
                     html = page.content()

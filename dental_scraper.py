@@ -294,6 +294,7 @@ TECH_KEYWORDS = {
     "cerec ac":                  "CEREC",
     # General crown service phrases — websites list "Dental Crowns" as a service
     # without always naming the brand; map to CEREC since column = Same Day Crowns
+    "crowns":                    "CEREC",
     "dental crowns":             "CEREC",
     "dental crown":              "CEREC",
     "tooth crowns":              "CEREC",
