@@ -20,7 +20,7 @@ Outputs:
     <input>_comparison.xlsx  — before/after report (changed cells highlighted)
 """
 
-import os, sys, re, shutil, glob, time, random, logging, warnings
+import os, sys, re, shutil, glob, time, random, logging, warnings, threading
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -99,6 +99,16 @@ _TEST_PATH_RE = re.compile(
 _LIVE_MAX_PAGES    = 10
 _LIVE_DELAY_MIN    = 1.2
 _LIVE_DELAY_MAX    = 3.0
+_LIVE_PW_TIMEOUT   = 90   # seconds — hard wall-clock limit per practice live crawl
+
+# URLs whose content is always loaded via JS APIs that Playwright cannot
+# reach (HMO portals, Kyruus SPAs, large aggregator sites).  Skip live crawl.
+_SKIP_LIVE_RE = re.compile(
+    r'(kaiser|healthgrades|zocdoc|vitals\.com|yelp\.com|google\.com|'
+    r'doctors-locations|find-a-physician|find-a-doctor|kyruus|'
+    r'adventhealth\.com/find|mdvip|webmd)',
+    re.I,
+)
 _LIVE_HEADERS      = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -206,15 +216,42 @@ def _live_crawl(website_url: str, practice_name: str = "") -> list:
         return []
     if not website_url.startswith("http"):
         website_url = "https://" + website_url
+
+    # Skip HMO portals / Kyruus SPAs — content is loaded via JS APIs
+    if _SKIP_LIVE_RE.search(website_url):
+        log.info("  skipping live crawl (known SPA/portal): %s", website_url)
+        return []
+
     try:
         base_netloc = urlparse(website_url).netloc
     except Exception:
         return []
 
-    pages = _live_crawl_playwright(website_url, base_netloc)
+    # Run Playwright with a hard wall-clock timeout so a hanging page can't
+    # freeze the entire workflow.
+    pages = _live_crawl_playwright_timed(website_url, base_netloc)
     if not pages:
         pages = _live_crawl_requests(website_url, base_netloc)
     return pages
+
+
+def _live_crawl_playwright_timed(website_url: str, base_netloc: str) -> list:
+    """Thread-wrapper that kills _live_crawl_playwright after _LIVE_PW_TIMEOUT seconds."""
+    result: list = []
+
+    def _worker():
+        try:
+            result.extend(_live_crawl_playwright(website_url, base_netloc))
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=_LIVE_PW_TIMEOUT)
+    if t.is_alive():
+        log.warning("  live crawl timed out after %ds — skipping %s",
+                    _LIVE_PW_TIMEOUT, base_netloc)
+    return result
 
 
 def _live_crawl_playwright(website_url: str, base_netloc: str) -> list:
@@ -280,7 +317,8 @@ def _live_crawl_playwright(website_url: str, base_netloc: str) -> list:
                                 const delay = ms => new Promise(r => setTimeout(r, ms));
                                 const step = 300;
                                 let pos = 0;
-                                while (pos < document.body.scrollHeight + step) {
+                                let maxSteps = 30;
+                                while (pos < document.body.scrollHeight + step && maxSteps-- > 0) {
                                     window.scrollTo(0, pos);
                                     await delay(180);
                                     pos += step;
