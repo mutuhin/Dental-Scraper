@@ -1280,8 +1280,8 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             continue
         if not _is_duplicate_doctor(n, combined_norms):
             combined_norms.append(_normalize_name_for_dedup(n))
-            # Use practice-level specialty/assoc since we have no bio text
-            all_sections_combined.append({"name": n, "text": all_text, "bio_url": ""})
+            # No bio text for this name — specialty determined per-doctor via write fallback
+            all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
 
     if all_sections_combined:
         # ── Follow each doctor's bio link for richer data ─────────────────────
@@ -1452,7 +1452,7 @@ def find_specialty(text):
             seen_labels.add(label)
 
     if not found:
-        return "General Dentistry"
+        return ""
 
     return " / ".join(found)
 
@@ -2863,7 +2863,7 @@ def write_output(practices_data, output_path):
                 s["locations_count"],
                 # Doctor data & reviews (per-doctor specialty/associations)
                 doc["associations"],
-                doc["specialty"],
+                doc["specialty"] or s["specialty"] or "General Dentistry",
                 s["google_rating"],  s["google_reviews"],
                 s["yelp_rating"],    s["yelp_reviews"],
                 s["testimonials"],
