@@ -1394,7 +1394,7 @@ def find_associations(text):
         # Match abbreviation as a whole word (avoid ADA matching "AAID", etc.)
         if re.search(rf'\b{re.escape(abbr)}\b', text_upper) or full.upper() in text_upper:
             found.append(abbr)
-    return ", ".join(found) if found else "Not Found"
+    return ", ".join(found) if found else ""
 
 
 def find_specialty(text):
@@ -2862,7 +2862,7 @@ def write_output(practices_data, output_path):
                 s["holistic"],        s["dental_plan"],     s["cancer_screening"],
                 s["locations_count"],
                 # Doctor data & reviews (per-doctor specialty/associations)
-                doc["associations"],
+                doc["associations"] or s["associations"] or "Not Found",
                 doc["specialty"] or s["specialty"] or "General Dentistry",
                 s["google_rating"],  s["google_reviews"],
                 s["yelp_rating"],    s["yelp_reviews"],
