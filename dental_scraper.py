@@ -1040,19 +1040,35 @@ def _parse_team_page_for_doctors(soup):
 
 def _count_hygienists_from_team(soup):
     """Count distinct team members with hygienist titles on a team page."""
-    seen = set()
+    _HYG_TITLE_RE = re.compile(
+        r'\bR\.?D\.?H\.?\b|RDHAP|BSDH|'
+        r'registered\s+dental\s+hygienist|'
+        r'licensed\s+dental\s+hygienist|'
+        r'dental\s+hygienist',
+        re.IGNORECASE,
+    )
+    _NAME_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)')
+    seen_names: set = set()
+    seen_keys: set = set()
     count = 0
-    for tag in soup.find_all(["h2", "h3", "h4", "h5", "p", "span", "div"]):
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "div", "li", "a", "strong", "b"]):
         text = tag.get_text(strip=True)
-        if len(text) > 100:
+        if len(text) > 200:
             continue
-        if re.search(
-            r"\bRDH\b|registered dental hygienist|dental hygienist",
-            text, re.IGNORECASE
-        ):
-            key = re.sub(r"\s+", " ", text.strip().lower())[:50]
-            if key not in seen:
-                seen.add(key)
+        if not _HYG_TITLE_RE.search(text):
+            continue
+        # Prefer name-based dedup so the same person in two tags counts once
+        nm = _NAME_RE.search(text)
+        if nm:
+            key = nm.group(1).strip().lower()
+            if key not in seen_names:
+                seen_names.add(key)
+                count += 1
+        else:
+            # No extractable name — use a short text window as key
+            key = re.sub(r"\s+", " ", text.strip().lower())[:60]
+            if key not in seen_keys:
+                seen_keys.add(key)
                 count += 1
     return count
 
@@ -1210,20 +1226,34 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             _soups_to_check.append(_sp)
     if homepage_soup and homepage_soup not in _soups_to_check:
         _soups_to_check.append(homepage_soup)
-    _hyg_seen = set()
+    _HYG_TITLE_RE2 = re.compile(
+        r'\bR\.?D\.?H\.?\b|RDHAP|BSDH|'
+        r'registered\s+dental\s+hygienist|'
+        r'licensed\s+dental\s+hygienist|'
+        r'dental\s+hygienist',
+        re.IGNORECASE,
+    )
+    _NAME_RE2 = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)')
+    _hyg_names: set = set()
+    _hyg_keys: set = set()
     _hyg_total = 0
     for _sp in _soups_to_check:
-        for _tag in _sp.find_all(["h2", "h3", "h4", "h5", "p", "span", "div", "li"]):
+        for _tag in _sp.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "div", "li", "a", "strong", "b"]):
             _t = _tag.get_text(strip=True)
-            if len(_t) > 120:
+            if len(_t) > 200:
                 continue
-            if re.search(
-                r"\bRDH\b|registered dental hygienist|dental hygienist",
-                _t, re.IGNORECASE
-            ):
+            if not _HYG_TITLE_RE2.search(_t):
+                continue
+            _nm = _NAME_RE2.search(_t)
+            if _nm:
+                _nk = _nm.group(1).strip().lower()
+                if _nk not in _hyg_names:
+                    _hyg_names.add(_nk)
+                    _hyg_total += 1
+            else:
                 _key = re.sub(r"\s+", " ", _t.strip().lower())[:60]
-                if _key not in _hyg_seen:
-                    _hyg_seen.add(_key)
+                if _key not in _hyg_keys:
+                    _hyg_keys.add(_key)
                     _hyg_total += 1
     if _hyg_total > 0:
         hygienist_count = _hyg_total
@@ -1564,11 +1594,18 @@ def find_hygienists(text):
     """
     Try to detect hygienist count from website text.
     Returns a number string if found, or "" if not determinable.
+
+    Three-stage approach:
+      1. Explicit numeric statement ("3 dental hygienists", "2 RDH on staff")
+      2. Count distinct named credential holders ("Jane Smith, RDH" x N)
+      3. Count raw credential mentions as a last resort (deduplicated by proximity)
     """
+    # Stage 1 — explicit count statements
     _HYG_PATTERNS = [
         r"\b(\d+)\s+(?:registered\s+)?(?:dental\s+)?hygienists?",
-        r"\b(\d+)\s+rdh\b",
+        r"\b(\d+)\s+r\.?d\.?h\.?s?\b",
         r"hygienists?\s*(?:on\s+(?:staff|our\s+team|the\s+team))?[:\s]+(\d+)",
+        r"\b(\d+)\s+(?:licensed\s+)?dental\s+hygiene\s+(?:specialists?|therapists?|professionals?)",
     ]
     for pat in _HYG_PATTERNS:
         m = re.search(pat, text, re.IGNORECASE)
@@ -1576,6 +1613,36 @@ def find_hygienists(text):
             for g in m.groups():
                 if g and g.isdigit():
                     return g
+
+    # Stage 2 — count distinct named RDH / hygienist credential holders
+    # Matches "First [M.] Last, RDH" or "First Last RDH" with common credential variants
+    _CRED_RE = re.compile(
+        r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)'   # First [M.] Last
+        r'\s*,?\s*'
+        r'(?:R\.?D\.?H\.?|BSDH|RDHAP|'
+        r'Registered\s+Dental\s+Hygienist|'
+        r'Licensed\s+Dental\s+Hygienist|'
+        r'Dental\s+Hygienist)',
+        re.IGNORECASE,
+    )
+    named = {m.group(1).strip().lower() for m in _CRED_RE.finditer(text)}
+    if named:
+        return str(len(named))
+
+    # Stage 3 — raw credential count (each distinct 30-char window around "RDH"
+    # or "dental hygienist" acts as a dedup key to avoid counting the same
+    # mention twice when it appears in nav + body)
+    windows: set = set()
+    for m in re.finditer(
+        r'\bR\.?D\.?H\.?\b|(?:registered|licensed)\s+dental\s+hygienist',
+        text, re.IGNORECASE,
+    ):
+        start = max(0, m.start() - 30)
+        key = text[start: m.start() + 30].strip().lower()
+        windows.add(key)
+    if windows:
+        return str(len(windows))
+
     return ""
 
 

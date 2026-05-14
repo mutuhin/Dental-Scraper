@@ -483,32 +483,39 @@ def _extract(pages: list) -> dict:
 
     # ── Hygienists ────────────────────────────────────────────────────────
     hyg = ""
-    # 1. Pattern search in all combined text
+    # 1. Pattern + name-counting search across all combined text
     h = ds.find_hygienists(all_text)
     if h:
         hyg = h
-    # 2. Team page count: count distinct RDH / "dental hygienist" bios
+    # 2. Structured tag scan across ALL pages (no class-name gating)
     if not hyg or hyg == "0":
-        team_soups = []
-        for i, (_p, url, _html) in enumerate(pages):
-            u = url.lower()
-            if any(kw in u for kw in ("team", "staff", "about", "hygien", "provider", "meet")):
-                team_soups.append(all_soups[i])
-        if not team_soups:
-            team_soups = all_soups  # try all pages if no explicit team page
+        _HYG_RE = re.compile(
+            r'\bR\.?D\.?H\.?\b|RDHAP|BSDH|'
+            r'registered\s+dental\s+hygienist|'
+            r'licensed\s+dental\s+hygienist|'
+            r'dental\s+hygienist',
+            re.I,
+        )
+        _NM_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)')
         rdh_names: set = set()
-        for soup in team_soups:
-            for card in soup.find_all(
-                ["div", "article", "li", "section"],
-                class_=re.compile(r"(team|staff|provider|member|doctor|bio|card)", re.I),
+        rdh_keys: set = set()
+        for soup in all_soups:
+            for tag in soup.find_all(
+                ["h1", "h2", "h3", "h4", "h5", "p", "span", "div", "li", "a", "strong", "b"]
             ):
-                text = card.get_text(separator=" ", strip=True)
-                if re.search(r"\bRDH\b|registered dental hygienist|dental hygienist", text, re.I):
-                    name_m = re.search(r"([A-Z][a-z]+ [A-Z][a-z]+)", text)
-                    key = name_m.group(1) if name_m else text[:40]
-                    rdh_names.add(key)
-        if rdh_names:
-            hyg = str(len(rdh_names))
+                text = tag.get_text(separator=" ", strip=True)
+                if len(text) > 200:
+                    continue
+                if not _HYG_RE.search(text):
+                    continue
+                nm = _NM_RE.search(text)
+                if nm:
+                    rdh_names.add(nm.group(1).strip().lower())
+                else:
+                    rdh_keys.add(re.sub(r"\s+", " ", text.strip().lower())[:60])
+        total = len(rdh_names) + len(rdh_keys)
+        if total:
+            hyg = str(total)
 
     return {
         C_HYG:   hyg,
