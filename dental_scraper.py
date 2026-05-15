@@ -875,10 +875,16 @@ _INVALID_NAME_WORDS = frozenset({
     "july", "august", "september", "october", "november", "december",
     # days
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    # pronouns — never valid name components
+    "his", "her", "him", "its", "our", "ours", "your", "yours",
+    "their", "theirs", "we", "us", "my", "me", "he", "she", "it", "they",
+    "who", "whom", "which",
+    # question words — appear in headings like "Dr. Smith Why..." or "Dr. Jones How..."
+    "how", "why",
     # common non-name words that follow "Dr. LastName"
-    "with", "for", "and", "the", "our", "your", "new", "all", "has",
-    "will", "can", "are", "was", "were", "been", "has", "have",
-    "their", "this", "that", "from", "about", "also", "only",
+    "with", "for", "and", "the", "new", "all", "has",
+    "will", "can", "are", "was", "were", "been", "have",
+    "this", "that", "from", "about", "also", "only",
     "after", "before", "during", "when", "what", "where",
     "open", "closed", "hours", "call", "visit", "book", "now",
 })
@@ -889,10 +895,14 @@ def _is_valid_doctor_name(name: str) -> bool:
     stripped = re.sub(r'^Dr\.?\s+', '', name, flags=re.IGNORECASE).strip()
     # Strip trailing credentials
     stripped = re.sub(
-        r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD|ABOD|ABCD|Ph\.?D\.?|Fellow).*$',
+        r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD|ABOD|ABCD|Ph\.?D\.?).*$',
         '', stripped, flags=re.IGNORECASE
     ).strip()
     words = stripped.split()
+    # Need at least a first and last name (single-word names like "Dr. Chris" are incomplete)
+    real_words = [w for w in words if len(w.strip('.,')) > 1]
+    if len(real_words) < 2:
+        return False
     for w in words:
         # Skip single-letter initials like "M."
         clean_w = w.strip('.,')
@@ -905,7 +915,7 @@ def _is_valid_doctor_name(name: str) -> bool:
 _NAME_PART      = r'[A-Z][A-Za-z\u00C0-\u024F]+(?:-[A-Z][A-Za-z\u00C0-\u024F]+)?'  # handles unicode + hyphens, NO digits
 _NAME_PART_CI   = r'[A-Za-z][A-Za-z\u00C0-\u024F]+(?:-[A-Za-z][A-Za-z\u00C0-\u024F]+)?'  # case-insensitive variant, NO digits
 # Credential block: DDS, DMD, MS, FAGD, MAGD, FICOI, FACD, FICD, AACD, ABGD, ABPD, etc.
-_CRED_SINGLE    = r'(?:DDS|DMD|MD|M\.D\.|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD|ABOD|ABCD|Ph\.?D\.?|Fellow)'
+_CRED_SINGLE    = r'(?:DDS|DMD|MD|M\.D\.|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD|ABOD|ABCD|Ph\.?D\.?)'
 _CRED_SUFFIX    = rf'(?:,?\s*{_CRED_SINGLE}(?:,?\s*{_CRED_SINGLE})*)?'
 _DOCTOR_PATTERNS = [
     # "Dr. First [M.] Last, DDS, MS" — comma before credentials allowed
