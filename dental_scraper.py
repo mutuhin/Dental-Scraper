@@ -1022,47 +1022,66 @@ def _parse_team_page_for_doctors(soup):
                     bio_url = href
                     break
 
-            if parent:
-                # Check whether this parent is too broad — contains OTHER doctor
-                # headings as siblings of the current heading.  That happens on
-                # flat team pages where all <h3> tags and their <p> bios live
-                # directly inside one wrapper <div>, causing every doctor to
-                # receive the same combined bio_text and therefore the same
-                # specialty / associations.
-                _other_dr_heads = [
-                    h for h in parent.find_all(["h2", "h3", "h4", "h5"])
-                    if h is not heading
-                    and re.search(r'\b(Dr\.?|DDS|DMD|Doctor)\b',
-                                  h.get_text(), re.I)
-                ]
-                if _other_dr_heads:
-                    # Narrow scope: collect only nodes between this heading and
-                    # the next heading that looks like a doctor name.
-                    parts = [heading_text]
-                    for sib in heading.next_siblings:
-                        if not hasattr(sib, "name"):
-                            continue
-                        if sib.name in ["h2", "h3", "h4", "h5"]:
-                            # Stop only at another doctor heading; sub-headings
-                            # like "Education" or "Memberships" are included.
-                            if re.search(r'\b(Dr\.?|DDS|DMD|Doctor)\b',
-                                         sib.get_text(), re.I):
-                                break
-                        parts.append(sib.get_text(separator=" ", strip=True))
-                    bio_text = " ".join(parts).lower()
-                else:
-                    bio_text = parent.get_text(separator=" ", strip=True).lower()
-            else:
-                parts = [heading_text]
-                for sib in heading.next_siblings:
+            # ── Bio text: walk ancestors to find the narrowest container that
+            # (a) contains only THIS doctor's heading (not other doctors), AND
+            # (b) has meaningful content beyond just the heading text.
+            # This handles card layouts, flat layouts, and split-column layouts.
+            _DR_RE = re.compile(r'\b(Dr\.?|DDS|DMD|Doctor)\b', re.I)
+            _MIN_EXTRA = 80   # chars beyond the heading to count as "has bio"
+
+            def _sibling_traversal(pivot, stop_re):
+                """Text of siblings after pivot, stopping at another doctor heading."""
+                parts = [pivot.get_text(separator=" ", strip=True)]
+                for sib in pivot.next_siblings:
                     if not hasattr(sib, "name"):
                         continue
-                    if sib.name in ["h2", "h3", "h4", "h5"]:
-                        if re.search(r'\b(Dr\.?|DDS|DMD|Doctor)\b',
-                                     sib.get_text(), re.I):
-                            break
+                    if sib.name in ["h2", "h3", "h4", "h5"] and stop_re.search(sib.get_text()):
+                        break
                     parts.append(sib.get_text(separator=" ", strip=True))
-                bio_text = " ".join(parts).lower()
+                return " ".join(parts)
+
+            bio_text = ""
+            _broad_anc = None   # first ancestor that contains other doctors
+
+            for anc in heading.parents:
+                if anc.name not in ["div", "section", "article", "li", "td", "tr"]:
+                    continue
+                _others = [h for h in anc.find_all(["h2", "h3", "h4", "h5"])
+                           if h is not heading and _DR_RE.search(h.get_text())]
+                if _others:
+                    _broad_anc = anc
+                    break  # Too broad — we'll do sibling traversal
+                # Not too broad. Does it have real bio content?
+                anc_text = anc.get_text(separator=" ", strip=True)
+                extra = len(anc_text) - len(heading_text)
+                if extra >= _MIN_EXTRA:
+                    bio_text = anc_text.lower()
+                    break
+
+            if not bio_text:
+                # Either no container found or every container was too broad.
+                # Strategy: sibling traversal from the heading (catches flat layouts),
+                # PLUS sibling traversal from the heading's PARENT element (catches
+                # split-column layouts where heading and bio are in adjacent sibling divs).
+                candidate = _sibling_traversal(heading, _DR_RE)
+
+                if _broad_anc is not None:
+                    # Also look at heading's immediate parent's siblings within
+                    # the broad ancestor — catches bio text in adjacent columns.
+                    h_parent = heading.parent
+                    if h_parent and h_parent is not _broad_anc:
+                        extra_parts = [candidate]
+                        for psib in h_parent.next_siblings:
+                            if not hasattr(psib, "find_all"):
+                                continue
+                            # Stop if this sibling contains another doctor heading
+                            if any(_DR_RE.search(h.get_text())
+                                   for h in psib.find_all(["h2","h3","h4","h5"])):
+                                break
+                            extra_parts.append(psib.get_text(separator=" ", strip=True))
+                        candidate = " ".join(extra_parts)
+
+                bio_text = candidate.lower()
 
             doctors.append({"name": name, "text": bio_text, "bio_url": bio_url})
             break
