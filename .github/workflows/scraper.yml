@@ -37,7 +37,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 330        # 5.5 hours — 100 practices × ~3 min each
+    timeout-minutes: 360        # 6 hours — increased to accommodate deeper crawl
 
     steps:
       # ── 1. Checkout your repo ──────────────────────────────────────────────

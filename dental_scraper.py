@@ -70,11 +70,12 @@ SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
 IS_CI        = os.environ.get("CI", "").lower() in ("true", "1")
 DELAY_SEC    = 1.5  if IS_CI else 2.5
 TIMEOUT      = 10   if IS_CI else 15
-PW_TIMEOUT   = 15000 if IS_CI else 25000
-# Sub-page crawl limits — reduced in CI to stay well within 5.5h timeout
-L1_LIMIT     = 25   if IS_CI else 60
-L2_LIMIT     = 15   if IS_CI else 40
-L3_LIMIT     = 10   if IS_CI else 30
+PW_TIMEOUT   = 20000 if IS_CI else 25000
+# Sub-page crawl limits.  Nav links are ALWAYS fetched in full (no cap).
+# These limits apply only to keyword-matched and remaining pages beyond nav.
+L1_LIMIT     = 40   if IS_CI else 60   # keyword links beyond nav (per practice)
+L2_LIMIT     = 30   if IS_CI else 40   # sub-pages of L1 pages
+L3_LIMIT     = 20   if IS_CI else 30   # any remaining same-domain links
 
 
 # ── Row-range control (0-based index into the practices list) ──
@@ -2380,23 +2381,26 @@ def scrape_practice(row, pw_page=None):
 
         if all_soup:
             sub_pages_found = set([base_url])
-            # ── Nav links first (ALL menu items regardless of keyword) ────────
+            # ── Nav links — always fetch ALL menu items, no cap ───────────────
+            # These are the most important pages (services, team, technology,
+            # about) and must never be skipped due to a page count limit.
             nav_urls = _collect_nav_links(all_soup, sub_pages_found)
-            # ── Keyword-matched links as supplementary ────────────────────────
+            # ── Keyword-matched links not already in nav ──────────────────────
             kw_urls  = _collect_subpage_links(all_soup, sub_pages_found)
-            lvl1_urls = nav_urls + kw_urls
 
-            # ── Level-1 sub-pages (up to 60) ─────────────────────────────────
             lvl2_candidates = []
-            for sub_url in lvl1_urls[:L1_LIMIT]:
-                log.info(f"   Sub-page: {sub_url}")
+
+            def _fetch_subpage(sub_url, page_label="sub"):
+                """Fetch one sub-page, merge text/soups/socials, cache it."""
+                nonlocal all_text
+                log.info(f"   Sub-page ({page_label}): {sub_url}")
                 time.sleep(DELAY_SEC)
                 sub_r = safe_get(sub_url)
                 if sub_r:
                     sub_html = sub_r.text
                     all_text += " " + extract_text(sub_html)
                     sub_soup = BeautifulSoup(sub_html, "lxml")
-                    all_scraped_soups.append(("sub", sub_soup))
+                    all_scraped_soups.append((page_label, sub_soup))
                     _merge_socials(sub_soup, sub_html)
                     if result["email"] == "Not Found":
                         found_mail = _check_mailto(sub_soup)
@@ -2404,35 +2408,30 @@ def scrape_practice(row, pw_page=None):
                             result["email"] = found_mail
                     _sub_counter[0] += 1
                     _cache(f"sub_{_sub_counter[0]:02d}", sub_url, sub_html)
-                    # Collect level-2 candidates (keyword-filtered)
+                    return sub_soup
+                return None
+
+            # ── Step 1: ALL nav/menu links (uncapped) ─────────────────────────
+            for sub_url in nav_urls:
+                sub_soup = _fetch_subpage(sub_url, "nav")
+                if sub_soup:
                     lvl2_candidates += _collect_subpage_links(sub_soup, sub_pages_found)
 
-            # ── Level-2 sub-pages (up to 40, new unique pages only) ───────────
+            # ── Step 2: Keyword-matched links beyond nav (L1_LIMIT cap) ───────
+            for sub_url in kw_urls[:L1_LIMIT]:
+                sub_soup = _fetch_subpage(sub_url, "kw")
+                if sub_soup:
+                    lvl2_candidates += _collect_subpage_links(sub_soup, sub_pages_found)
+
+            # ── Level-2 sub-pages (up to L2_LIMIT, new unique pages only) ───────
             for sub_url in lvl2_candidates[:L2_LIMIT]:
-                log.info(f"   Sub-page (L2): {sub_url}")
-                time.sleep(DELAY_SEC)
-                sub_r = safe_get(sub_url)
-                if sub_r:
-                    sub_html = sub_r.text
-                    all_text += " " + extract_text(sub_html)
-                    sub_soup = BeautifulSoup(sub_html, "lxml")
-                    all_scraped_soups.append(("sub_l2", sub_soup))
-                    _merge_socials(sub_soup, sub_html)
-                    if result["email"] == "Not Found":
-                        found_mail = _check_mailto(sub_soup)
-                        if found_mail:
-                            result["email"] = found_mail
-                    _sub_counter[0] += 1
-                    _cache(f"sub_{_sub_counter[0]:02d}", sub_url, sub_html)
+                _fetch_subpage(sub_url, "sub_l2")
 
             # ── Level-3 priority pass — crawl every remaining same-domain link
-            # not yet visited in L1/L2. Capped at 30 pages to stay reasonable.
-            # Adds to all_text so field extraction (tech, services, specialty,
-            # associations) downstream benefits from the extra page content.
-            _l3_soups = ([all_soup]) + [sp for _, sp in all_scraped_soups]
-            _l3_seen  = set(sub_pages_found)
-            _l3_urls  = []
-            for _sp in _l3_soups:
+            # not yet visited in L1/L2. Capped at L3_LIMIT to stay reasonable.
+            _l3_seen = set(sub_pages_found)
+            _l3_urls = []
+            for _, _sp in [(None, all_soup)] + all_scraped_soups:
                 for _a in _sp.find_all("a", href=True):
                     _full = urljoin(base_url, _a["href"])
                     if (
@@ -2444,23 +2443,9 @@ def scrape_practice(row, pw_page=None):
                         _l3_urls.append(_full)
                         _l3_seen.add(_full)
             if _l3_urls:
-                log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to 30")
+                log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to {L3_LIMIT}")
             for _l3_url in _l3_urls[:L3_LIMIT]:
-                log.info(f"   Sub-page (L3): {_l3_url}")
-                time.sleep(DELAY_SEC)
-                _l3_r = safe_get(_l3_url)
-                if _l3_r:
-                    _l3_html = _l3_r.text
-                    all_text += " " + extract_text(_l3_html)
-                    _l3_soup = BeautifulSoup(_l3_html, "lxml")
-                    all_scraped_soups.append(("sub_l3", _l3_soup))
-                    _merge_socials(_l3_soup, _l3_html)
-                    if result["email"] == "Not Found":
-                        _em = _check_mailto(_l3_soup)
-                        if _em:
-                            result["email"] = _em
-                    _sub_counter[0] += 1
-                    _cache(f"sub_{_sub_counter[0]:02d}", _l3_url, _l3_html)
+                _fetch_subpage(_l3_url, "sub_l3")
 
         # ── d) Extract fields that need soup (testimonials, email) ─────────────
         if all_soup:
