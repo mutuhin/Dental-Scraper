@@ -1012,14 +1012,44 @@ def _parse_team_page_for_doctors(soup):
                     break
 
             if parent:
-                bio_text = parent.get_text(separator=" ", strip=True).lower()
+                # Check whether this parent is too broad — contains OTHER doctor
+                # headings as siblings of the current heading.  That happens on
+                # flat team pages where all <h3> tags and their <p> bios live
+                # directly inside one wrapper <div>, causing every doctor to
+                # receive the same combined bio_text and therefore the same
+                # specialty / associations.
+                _other_dr_heads = [
+                    h for h in parent.find_all(["h2", "h3", "h4", "h5"])
+                    if h is not heading
+                    and re.search(r'\b(Dr\.?|DDS|DMD|Doctor)\b',
+                                  h.get_text(), re.I)
+                ]
+                if _other_dr_heads:
+                    # Narrow scope: collect only nodes between this heading and
+                    # the next heading that looks like a doctor name.
+                    parts = [heading_text]
+                    for sib in heading.next_siblings:
+                        if not hasattr(sib, "name"):
+                            continue
+                        if sib.name in ["h2", "h3", "h4", "h5"]:
+                            # Stop only at another doctor heading; sub-headings
+                            # like "Education" or "Memberships" are included.
+                            if re.search(r'\b(Dr\.?|DDS|DMD|Doctor)\b',
+                                         sib.get_text(), re.I):
+                                break
+                        parts.append(sib.get_text(separator=" ", strip=True))
+                    bio_text = " ".join(parts).lower()
+                else:
+                    bio_text = parent.get_text(separator=" ", strip=True).lower()
             else:
                 parts = [heading_text]
                 for sib in heading.next_siblings:
                     if not hasattr(sib, "name"):
                         continue
                     if sib.name in ["h2", "h3", "h4", "h5"]:
-                        break
+                        if re.search(r'\b(Dr\.?|DDS|DMD|Doctor)\b',
+                                     sib.get_text(), re.I):
+                            break
                     parts.append(sib.get_text(separator=" ", strip=True))
                 bio_text = " ".join(parts).lower()
 
@@ -1237,12 +1267,43 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
     _hyg_names: set = set()
     _hyg_keys: set = set()
     _hyg_total = 0
+    # Also match single first-name staff like "Dawn, RDH"
+    _SINGLE_NAME_RE2 = re.compile(
+        r'\b([A-Z][a-z]{2,})\s*,?\s+'
+        r'(?:R\.?D\.?H\.?|BSDH|RDHAP|'
+        r'registered\s+dental\s+hygienist|'
+        r'licensed\s+dental\s+hygienist|'
+        r'dental\s+hygienist)',
+        re.IGNORECASE,
+    )
     for _sp in _soups_to_check:
         for _tag in _sp.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "div", "li", "a", "strong", "b"]):
             _t = _tag.get_text(strip=True)
-            if len(_t) > 200:
-                continue
             if not _HYG_TITLE_RE2.search(_t):
+                continue
+            if len(_t) > 200:
+                # Tag too long to use as a unit — regex-scan all credential
+                # snippets within it to avoid missing hygienists in big blocks
+                for _cm in _HYG_TITLE_RE2.finditer(_t):
+                    _snippet = _t[max(0, _cm.start()-80): _cm.start()+80]
+                    _nm2 = _NAME_RE2.search(_snippet)
+                    if _nm2:
+                        _nk2 = _nm2.group(1).strip().lower()
+                        if _nk2 not in _hyg_names:
+                            _hyg_names.add(_nk2)
+                            _hyg_total += 1
+                    else:
+                        _sn2 = _SINGLE_NAME_RE2.search(_snippet)
+                        if _sn2:
+                            _nk2 = _sn2.group(1).strip().lower()
+                            if _nk2 not in _hyg_names:
+                                _hyg_names.add(_nk2)
+                                _hyg_total += 1
+                        else:
+                            _key2 = re.sub(r"\s+", " ", _snippet.strip().lower())[:80]
+                            if _key2 not in _hyg_keys:
+                                _hyg_keys.add(_key2)
+                                _hyg_total += 1
                 continue
             _nm = _NAME_RE2.search(_t)
             if _nm:
@@ -1251,10 +1312,18 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     _hyg_names.add(_nk)
                     _hyg_total += 1
             else:
-                _key = re.sub(r"\s+", " ", _t.strip().lower())[:60]
-                if _key not in _hyg_keys:
-                    _hyg_keys.add(_key)
-                    _hyg_total += 1
+                # Try single-first-name match before falling back to key dedup
+                _sn = _SINGLE_NAME_RE2.search(_t)
+                if _sn:
+                    _nk = _sn.group(1).strip().lower()
+                    if _nk not in _hyg_names:
+                        _hyg_names.add(_nk)
+                        _hyg_total += 1
+                else:
+                    _key = re.sub(r"\s+", " ", _t.strip().lower())[:60]
+                    if _key not in _hyg_keys:
+                        _hyg_keys.add(_key)
+                        _hyg_total += 1
     if _hyg_total > 0:
         hygienist_count = _hyg_total
 
@@ -1629,16 +1698,30 @@ def find_hygienists(text):
     if named:
         return str(len(named))
 
-    # Stage 3 — raw credential count (each distinct 30-char window around "RDH"
-    # or "dental hygienist" acts as a dedup key to avoid counting the same
-    # mention twice when it appears in nav + body)
+    # Stage 2b — single-first-name staff (e.g. "Dawn, RDH" or "Dawn RDH")
+    # Only used when Stage 2 found nothing; avoids over-counting body text.
+    _SINGLE_RE = re.compile(
+        r'\b([A-Z][a-z]{2,})\s*,?\s+'
+        r'(?:R\.?D\.?H\.?|BSDH|RDHAP|'
+        r'Registered\s+Dental\s+Hygienist|'
+        r'Licensed\s+Dental\s+Hygienist|'
+        r'Dental\s+Hygienist)',
+        re.IGNORECASE,
+    )
+    single_named = {m.group(1).strip().lower() for m in _SINGLE_RE.finditer(text)}
+    if single_named:
+        return str(len(single_named))
+
+    # Stage 3 — raw credential count: use a 60-char window (wider than before)
+    # around each RDH / "dental hygienist" mention as a dedup key so the same
+    # person listed on nav + body doesn't inflate the count.
     windows: set = set()
     for m in re.finditer(
         r'\bR\.?D\.?H\.?\b|(?:registered|licensed)\s+dental\s+hygienist',
         text, re.IGNORECASE,
     ):
-        start = max(0, m.start() - 30)
-        key = text[start: m.start() + 30].strip().lower()
+        start = max(0, m.start() - 60)
+        key = text[start: m.start() + 60].strip().lower()
         windows.add(key)
     if windows:
         return str(len(windows))
