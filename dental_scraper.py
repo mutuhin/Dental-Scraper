@@ -899,10 +899,6 @@ def _is_valid_doctor_name(name: str) -> bool:
         '', stripped, flags=re.IGNORECASE
     ).strip()
     words = stripped.split()
-    # Need at least a first and last name (single-word names like "Dr. Chris" are incomplete)
-    real_words = [w for w in words if len(w.strip('.,')) > 1]
-    if len(real_words) < 2:
-        return False
     for w in words:
         # Skip single-letter initials like "M."
         clean_w = w.strip('.,')
@@ -978,7 +974,7 @@ def _parse_team_page_for_doctors(soup):
     doctors = []
     seen_names = set()
 
-    for heading in soup.find_all(["h2", "h3", "h4", "h5"]):
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5"]):
         heading_text = heading.get_text(separator=" ", strip=True)
         heading_ascii = _ascii_normalize(heading_text)
         for pattern in _DOCTOR_PATTERNS:
@@ -1027,7 +1023,7 @@ def _parse_team_page_for_doctors(soup):
             # (b) has meaningful content beyond just the heading text.
             # This handles card layouts, flat layouts, and split-column layouts.
             _DR_RE = re.compile(r'\b(Dr\.?|DDS|DMD|Doctor)\b', re.I)
-            _MIN_EXTRA = 80   # chars beyond the heading to count as "has bio"
+            _MIN_EXTRA = 40   # chars beyond the heading to count as "has bio"
 
             def _sibling_traversal(pivot, stop_re):
                 """Text of siblings after pivot, stopping at another doctor heading."""
@@ -1411,6 +1407,33 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             combined_norms.append(_normalize_name_for_dedup(n))
             # No bio text for this name — specialty determined per-doctor via write fallback
             all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
+
+    # ── Bio enrichment via name-context-window search ─────────────────────────
+    # For any doctor whose bio_text is very short (heading only, or from a
+    # listing page with no body content), search all_text for their name and
+    # extract a 600-char window that may contain associations / specialty.
+    # This handles Elementor/Divi pages, multi-location chains, and any layout
+    # where the heading and bio are not co-located in the same DOM container.
+    _all_text_lower = all_text.lower() if all_text else ""
+    for _sec in all_sections_combined:
+        if len(_sec.get("text", "")) >= 150:
+            continue  # already has decent bio content
+        # Build search keys: full name, and last-two-words (without "Dr.")
+        _raw_name = _sec["name"]
+        _name_stripped = re.sub(r'^Dr\.?\s+', '', _raw_name, flags=re.I).strip()
+        _name_words = _name_stripped.split()
+        _keys = [_raw_name.lower()]
+        if len(_name_words) >= 2:
+            _keys.append(" ".join(_name_words[-2:]).lower())
+        for _key in _keys:
+            _pos = _all_text_lower.find(_key)
+            if _pos < 0:
+                continue
+            # Grab up to 600 chars starting just before the name occurrence
+            _window = all_text[max(0, _pos - 30): _pos + 600]
+            if len(_window) > len(_key) + 100:
+                _sec["text"] = (_sec.get("text", "") + " " + _window).strip().lower()
+                break
 
     if all_sections_combined:
         # ── Follow each doctor's bio link for richer data ─────────────────────
@@ -3026,8 +3049,11 @@ def write_output(practices_data, output_path):
                 s["holistic"],        s["dental_plan"],     s["cancer_screening"],
                 s["locations_count"],
                 # Doctor data & reviews (per-doctor specialty/associations)
-                doc["associations"] or s["associations"] or "Not Found",
-                doc["specialty"] or s["specialty"] or "General Dentistry",
+                # Do NOT fall back to s["associations"]/s["specialty"] here —
+                # those are practice-level values that would make every doctor
+                # appear to have the first doctor's data when no per-doctor bio exists.
+                doc["associations"] or "Not Found",
+                doc["specialty"] or "Not Found",
                 s["google_rating"],  s["google_reviews"],
                 s["yelp_rating"],    s["yelp_reviews"],
                 s["testimonials"],
