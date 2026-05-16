@@ -1434,37 +1434,55 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
 
     if all_sections_combined:
         # ── Follow each doctor's bio link for richer data ─────────────────────
-        # When multiple doctors share a page, only use bio_text that is
-        # genuinely scoped to that individual doctor (from _parse_team_page or
-        # their own bio URL). The old name-context-window approach grabbed a
-        # 600-char slice of all_text around each name, but because doctors are
-        # listed close together, all slices contained the same specialty/
-        # association keywords — making every doctor look like the first.
+        # Strategy (in priority order):
+        #   1. bio_text from _parse_team_page_for_doctors (properly scoped)
+        #   2. Doctor's individual bio URL page (safe_get, no pw_page needed)
+        #   3. Search already-scraped soups for a page whose h1/h2 names this doctor
+        #   4. If multi-doctor and still no data: output "" → "Not Found"
+        #      (never copy shared context; that causes all doctors to duplicate)
+        #   5. If single doctor: fall back to all_text (whole site = 1 doctor)
         _multi_doctor = len(all_sections_combined) > 1
         doctors = []
         for sec in all_sections_combined:
             bio_text = sec["text"]
             bio_url  = sec.get("bio_url", "")
 
-            if bio_url and pw_page and base_url:
+            # Step 2 — follow bio URL (safe_get only; pw_page not required)
+            if bio_url and base_url and len(bio_text) < 300:
                 full_bio = urljoin(base_url, bio_url)
-                # Only follow same-domain bio links
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
                     try:
                         log.info(f"   Doctor bio: {full_bio}")
                         time.sleep(DELAY_SEC)
                         bio_r = safe_get(full_bio)
                         if bio_r and len(bio_r.text) > 500:
-                            bio_text += " " + bio_r.text.lower()
+                            bio_text = (bio_text + " " + bio_r.text).strip().lower()
                     except Exception:
                         pass
 
-            # For multi-doctor practices with a short bio, we cannot tell
-            # which keywords belong to which doctor — return empty so the
-            # write loop shows "Not Found" rather than copying another
-            # doctor's data.  For single-doctor practices, fall back to
-            # all_text (the whole site = that one doctor's data).
+            # Step 3 — search already-scraped soups for this doctor's bio page
+            if _multi_doctor and len(bio_text) < 100 and all_soups_for_team:
+                _name_core = re.sub(
+                    r'^Dr\.?\s+', '', sec["name"], flags=re.I
+                ).strip().lower()
+                _name_words = _name_core.split()
+                _last = _name_words[-1] if _name_words else ""
+                for _, _sp in all_soups_for_team:
+                    for _h in _sp.find_all(["h1", "h2"]):
+                        _h_lower = _h.get_text().lower()
+                        if _name_core in _h_lower or (
+                            len(_last) >= 5 and _last in _h_lower
+                        ):
+                            _pg = _sp.get_text(separator=" ", strip=True)
+                            if len(_pg) > 300:
+                                bio_text = _pg.lower()
+                            break
+                    if len(bio_text) >= 100:
+                        break
+
+            # Step 4/5 — decide source for specialty/associations
             if _multi_doctor and len(bio_text) < 100:
+                # Cannot distinguish per-doctor data from shared practice text
                 doctors.append({
                     "name":         sec["name"],
                     "specialty":    "",
