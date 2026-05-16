@@ -3059,8 +3059,8 @@ def write_output(practices_data, output_path):
                 fallback_name = inp.get("Doctor Name") or "Not Found"
             doctors = [{
                 "name":         fallback_name,
-                "specialty":    s["specialty"],
-                "associations": s["associations"],
+                "specialty":    "",
+                "associations": "",
             }]
 
         # Ensure the practice owner (from "Practice Name" column) appears in
@@ -3105,8 +3105,8 @@ def write_output(practices_data, output_path):
                 if not already_present:
                     doctors.insert(0, {
                         "name":         owner_name,
-                        "specialty":    s["specialty"],
-                        "associations": s["associations"],
+                        "specialty":    "",
+                        "associations": "",
                     })
 
         for doc in doctors:
