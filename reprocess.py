@@ -370,19 +370,39 @@ def dedup_doctors_in_xlsx(input_path: str) -> str:
         if removed:
             log.info(f"  [{idx_key}] {practice_name}: {len(raw_names)} → {len(kept_names)} doctors  (-{removed} dupes)")
 
-        # Build a merged template: for each column take the first non-empty value
-        # across ALL rows so that Google ratings (or any other data) stored on a
-        # later row is not lost when we drop earlier rows.
+        # Columns that are per-DOCTOR (0-based): must NOT be merged into the
+        # shared template — each doctor keeps their own value.
+        # Col 39 = "Associations / Memberships", col 40 = "Doctor Specialty"
+        _DOCTOR_COLS = {39, 40}
         _EMPTY = {None, "", "Not Found", "ERROR"}
+
+        # Build a merged template for PRACTICE-level columns only.
+        # For doctor-specific columns, the template keeps the first row's value
+        # as a placeholder but it will be overwritten per-doctor below.
         template = list(rows[0])
         for row in rows[1:]:
             for ci, val in enumerate(row):
+                if ci in _DOCTOR_COLS:
+                    continue  # never merge doctor-specific data into template
                 if str(template[ci]).strip() in _EMPTY and str(val or "").strip() not in _EMPTY:
                     template[ci] = val
+
+        # Map each raw name string → its original row so we can restore
+        # per-doctor associations/specialty when building the output rows.
+        name_to_row = {}
+        for row in rows:
+            key = str(row[2] or "")
+            if key not in name_to_row:
+                name_to_row[key] = row
 
         for name in kept_names:
             new_row = list(template)
             new_row[2] = name
+            # Restore doctor-specific fields from this doctor's original row
+            orig = name_to_row.get(str(name or ""), rows[0])
+            for ci in _DOCTOR_COLS:
+                if ci < len(orig):
+                    new_row[ci] = orig[ci]
             kept_rows.append(new_row)
 
     # Write output workbook
