@@ -964,6 +964,51 @@ def _extract_names_from_soup(soup):
     return names
 
 
+def _extract_names_from_soup_strict(soup):
+    """
+    Stricter doctor-name extraction used as a last resort when heading-based
+    parsing found zero sections.  Scans ONLY heading and strong/label tags
+    (not full page text) and requires at least First + Last name words after
+    the 'Dr.' prefix so testimonial snippets ('Thank you Dr. Smith!') and
+    shortened running-text mentions are excluded.
+    """
+    _DR_PREFIX = re.compile(r'^Dr\.?\s+', re.I)
+    names = set()
+    # Only scan tags that are likely to contain a doctor's full name
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b", "dt", "th"]):
+        text = tag.get_text(separator=" ", strip=True)
+        if len(text) > 120:      # skip long blocks; headings are short
+            continue
+        text_ascii = _ascii_normalize(text)
+        for pattern in _DOCTOR_PATTERNS:
+            m = re.search(pattern, text_ascii)
+            if not m:
+                continue
+            clean = re.sub(r"\s+", " ", m.group(0).strip())
+            _after = text_ascii[m.end():]
+            _ext = _CRED_TAIL_RE.match(_after)
+            if _ext:
+                clean = re.sub(r"\s+", " ", (clean + _ext.group(0)).strip())
+            if re.search(r'\d', clean):
+                continue
+            if any(w in clean.lower() for w in _SKIP_WORDS):
+                continue
+            if not _is_valid_doctor_name(clean):
+                continue
+            # Require at least 2 real name words after stripping 'Dr.' prefix
+            _name_body = _DR_PREFIX.sub("", clean).strip()
+            _name_body = re.sub(
+                r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD|ABOD|ABCD|Ph\.?D\.?).*$',
+                '', _name_body, flags=re.I
+            ).strip()
+            _real_words = [w for w in _name_body.split() if len(w.strip('.,')) > 1]
+            if len(_real_words) < 2:
+                continue   # "Dr. Smith" alone is too ambiguous — skip
+            names.add(clean)
+            break  # one match per tag
+    return names
+
+
 def _parse_team_page_for_doctors(soup):
     """
     Parse a team/doctor page to find individual doctor sections.
@@ -1374,39 +1419,18 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                 combined_norms.append(_normalize_name_for_dedup(sec["name"]))
                 all_sections_combined.append(sec)
 
-    # ── Collect supplementary names, preferring roster pages to avoid bio false positives.
-    # Roster page = has 2+ heading-level doctor sections, OR 1 section with many raw names
-    # (some team pages don't use headings for every doctor, e.g. mollnerdentistry.com/meet_the_team/)
-    all_names = set()
-    for _, sp in ([("use", use_soup)] if use_soup else []) + list(all_soups_for_team):
-        page_secs = _parse_team_page_for_doctors(sp)
-        page_names = _extract_names_from_soup(sp)
-        if len(page_secs) >= 2 or (len(page_secs) >= 1 and len(page_names) >= 4):
-            all_names |= page_names
-
-    if not all_names:
-        # Second chance: pages with 3+ raw names (likely roster, not individual bio)
-        for _, sp in all_soups_for_team:
-            page_names = _extract_names_from_soup(sp)
-            if len(page_names) >= 3:
-                all_names |= page_names
-
-    if not all_names:
-        # Last resort: any page with any names (some sites have only 1 doctor page)
-        for _, sp in all_soups_for_team:
-            all_names |= _extract_names_from_soup(sp)
-        if not all_names and homepage_soup:
-            all_names = _extract_names_from_soup(homepage_soup)
-
-    # Add names not already covered by sections (so we never miss a doctor)
-    for n in sorted(all_names, key=lambda x: len(x.split()), reverse=True):
-        if _is_location_false_name(n):
-            log.debug(f"   Filtered domain-location false name: {n}")
-            continue
-        if not _is_duplicate_doctor(n, combined_norms):
-            combined_norms.append(_normalize_name_for_dedup(n))
-            # No bio text for this name — specialty determined per-doctor via write fallback
-            all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
+    # ── Supplementary names: text-scan ONLY the best team page, and ONLY when
+    # heading-based parsing found zero sections.  Scanning full page text on
+    # service/blog/testimonial pages (the old "second chance" / "last resort"
+    # loops) was the primary source of false-positive doctor names.
+    if not all_sections_combined and use_soup:
+        all_names = _extract_names_from_soup_strict(use_soup)
+        for n in sorted(all_names, key=lambda x: len(x.split()), reverse=True):
+            if _is_location_false_name(n):
+                continue
+            if not _is_duplicate_doctor(n, combined_norms):
+                combined_norms.append(_normalize_name_for_dedup(n))
+                all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
 
     # ── Bio enrichment via name-context-window search ─────────────────────────
     # For any doctor whose bio_text is very short (heading only, or from a
@@ -2993,12 +3017,13 @@ def write_output(practices_data, output_path):
                 "associations": s["associations"],
             }]
 
-        # Always ensure the practice owner (from "Office Name" / "Practice Name")
-        # appears in the doctor list.  The source column stores "Last, First";
-        # convert to "First Last" before inserting.
+        # Ensure the practice owner (from "Practice Name" column) appears in
+        # the doctor list IF the column value looks like a personal name.
+        # "Last, First" format → convert to "First Last".
+        # Guard: skip company/practice names (3+ real words without credentials,
+        # e.g. "Secure Dental East Peoria") — only personal names are inserted.
         raw_owner = str(inp.get("Practice Name") or "").strip()
         if raw_owner:
-            # Strip credentials (DDS, DMD, etc.)
             owner_clean = _CRED_RE.sub("", raw_owner).strip(" ,.-")
             # "Last, First" → "First Last"
             if "," in owner_clean:
@@ -3006,18 +3031,37 @@ def write_output(practices_data, output_path):
                 owner_name = f"{parts[1]} {parts[0]}".strip() if parts[1] else parts[0]
             else:
                 owner_name = owner_clean
-            # Only add if not already present (case-insensitive, credential-stripped dedup)
-            owner_key = _normalize_name_for_dedup(owner_name)
-            already_present = any(
-                _normalize_name_for_dedup(d.get("name", "")) == owner_key
-                for d in doctors
+            # Guard: only treat as a personal name if:
+            # - original value had "Last, First" comma format, OR
+            # - exactly 2 words remain and none is a dental/business term
+            _BIZ_WORDS = frozenset({
+                "dental", "dentistry", "dentist", "care", "group", "center",
+                "centre", "clinic", "practice", "office", "associates",
+                "health", "wellness", "smile", "smiles", "studio", "family",
+                "general", "orthodontic", "implant", "cosmetic", "pediatric",
+            })
+            _own_words = [w for w in owner_name.split()
+                          if len(w.strip('.,')) > 1 and not re.match(r'^[A-Z]\.$', w)]
+            _has_comma_format = "," in _CRED_RE.sub("", raw_owner)
+            _no_biz_words = not any(w.lower() in _BIZ_WORDS for w in _own_words)
+            _is_person = (
+                _is_valid_doctor_name(owner_name)
+                and _no_biz_words
+                and 2 <= len(_own_words) <= 3
+                and (_has_comma_format or len(_own_words) == 2)
             )
-            if owner_name and not already_present:
-                doctors.insert(0, {
-                    "name":         owner_name,
-                    "specialty":    s["specialty"],
-                    "associations": s["associations"],
-                })
+            if _is_person:
+                owner_key = _normalize_name_for_dedup(owner_name)
+                already_present = any(
+                    _normalize_name_for_dedup(d.get("name", "")) == owner_key
+                    for d in doctors
+                )
+                if not already_present:
+                    doctors.insert(0, {
+                        "name":         owner_name,
+                        "specialty":    s["specialty"],
+                        "associations": s["associations"],
+                    })
 
         for doc in doctors:
             rf = fills["row_alt"] if r_idx % 2 == 0 else fills["white"]
