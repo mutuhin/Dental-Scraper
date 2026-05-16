@@ -1054,14 +1054,39 @@ def _parse_team_page_for_doctors(soup):
             if not parent:
                 parent = heading.find_parent(["div", "article", "li"])
 
-            # Extract bio link from the container (doctor detail page)
+            # Extract bio link from the container (doctor detail page).
+            # Prefer links whose href/text suggests a bio/profile page;
+            # fall back to the first valid same-domain link.
+            _BIO_HREF_RE = re.compile(
+                r'team|doctor|provider|staff|bio|profile|meet|about|physician',
+                re.I,
+            )
+            _BIO_TEXT_RE = re.compile(
+                r'bio|learn\s+more|meet|read\s+more|profile|about\s+dr|about\s+the',
+                re.I,
+            )
             bio_url = ""
+            _bio_fallback = ""
             search_node = parent or heading
-            for a in search_node.find_all("a", href=True):
-                href = a.get("href", "")
-                if href and not href.startswith(("#", "mailto:", "tel:", "javascript:")):
-                    bio_url = href
+            # Also search heading's immediate parent siblings (split-column layouts)
+            _bio_nodes = [search_node]
+            if heading.parent and heading.parent is not search_node:
+                _bio_nodes.append(heading.parent)
+            for _bnode in _bio_nodes:
+                for a in _bnode.find_all("a", href=True):
+                    href = a.get("href", "")
+                    if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                        continue
+                    link_text = a.get_text(strip=True)
+                    if _BIO_HREF_RE.search(href) or _BIO_TEXT_RE.search(link_text):
+                        bio_url = href
+                        break
+                    if not _bio_fallback:
+                        _bio_fallback = href
+                if bio_url:
                     break
+            if not bio_url:
+                bio_url = _bio_fallback
 
             # ── Bio text: walk ancestors to find the narrowest container that
             # (a) contains only THIS doctor's heading (not other doctors), AND
@@ -1460,18 +1485,28 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     except Exception:
                         pass
 
-            # Step 3 — search already-scraped soups for this doctor's bio page
+            # Step 3 — search already-scraped soups for this doctor's bio page.
+            # Strip credentials from the name before matching so that
+            # "Laura Koberda, DDS" matches a page whose h1 says "Laura Koberda".
             if _multi_doctor and len(bio_text) < 100 and all_soups_for_team:
                 _name_core = re.sub(
                     r'^Dr\.?\s+', '', sec["name"], flags=re.I
+                ).strip()
+                _name_core = re.sub(
+                    r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|Ph\.?D\.?)\b.*$',
+                    '', _name_core, flags=re.I,
                 ).strip().lower()
                 _name_words = _name_core.split()
                 _last = _name_words[-1] if _name_words else ""
+                _first = _name_words[0] if _name_words else ""
                 for _, _sp in all_soups_for_team:
-                    for _h in _sp.find_all(["h1", "h2"]):
+                    for _h in _sp.find_all(["h1", "h2", "h3", "h4"]):
                         _h_lower = _h.get_text().lower()
                         if _name_core in _h_lower or (
                             len(_last) >= 5 and _last in _h_lower
+                        ) or (
+                            len(_first) >= 4 and len(_last) >= 5
+                            and _first in _h_lower and _last in _h_lower
                         ):
                             _pg = _sp.get_text(separator=" ", strip=True)
                             if len(_pg) > 300:
