@@ -1009,6 +1009,57 @@ def _extract_names_from_soup_strict(soup):
     return names
 
 
+def _extract_doctor_scoped_text(soup, name_core):
+    """
+    Find the heading on `soup` whose text contains `name_core`, then return
+    the narrowest ancestor container that belongs only to this doctor (does not
+    contain other doctor headings).  Falls back to sibling traversal.
+    Returns lowercased scoped text, or "" if nothing found.
+
+    Used instead of full-page text so that site-wide keywords ("orthodontic" in
+    navigation / banners) don't contaminate per-doctor specialty extraction.
+    """
+    _DR_RE2 = re.compile(r'\b(Dr\.?|DDS|DMD|Doctor)\b', re.I)
+    name_words = name_core.split()
+    _last = name_words[-1] if name_words else ""
+    _first = name_words[0] if name_words else ""
+
+    def _matches(h_lower):
+        return (
+            name_core in h_lower
+            or (len(_last) >= 5 and _last in h_lower)
+            or (len(_first) >= 4 and len(_last) >= 5
+                and _first in h_lower and _last in h_lower)
+        )
+
+    for _h in soup.find_all(["h1", "h2", "h3", "h4", "h5"]):
+        if not _matches(_h.get_text().lower()):
+            continue
+        # Walk ancestors for narrowest non-shared container
+        for anc in _h.parents:
+            if anc.name not in ["div", "section", "article", "li", "td", "tr"]:
+                continue
+            _others = [h for h in anc.find_all(["h2", "h3", "h4", "h5"])
+                       if h is not _h and _DR_RE2.search(h.get_text())]
+            if _others:
+                break  # too broad — fall through to sibling traversal
+            anc_text = anc.get_text(separator=" ", strip=True)
+            if len(anc_text) > 30:
+                return anc_text.lower()
+        # Sibling traversal fallback
+        parts = [_h.get_text(separator=" ", strip=True)]
+        for sib in _h.next_siblings:
+            if not hasattr(sib, "name"):
+                continue
+            if sib.name in ["h2", "h3", "h4", "h5"] and _DR_RE2.search(sib.get_text()):
+                break
+            parts.append(sib.get_text(separator=" ", strip=True))
+        result = " ".join(parts).lower()
+        if len(result) > 10:
+            return result
+    return ""
+
+
 def _parse_team_page_for_doctors(soup):
     """
     Parse a team/doctor page to find individual doctor sections.
@@ -1472,8 +1523,25 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             bio_text = sec["text"]
             bio_url  = sec.get("bio_url", "")
 
-            # Step 2 — follow bio URL (safe_get only; pw_page not required)
-            if bio_url and base_url and len(bio_text) < 300:
+            # Precompute name_core once (shared by Steps 2 & 3)
+            _name_core = re.sub(r'^Dr\.?\s+', '', sec["name"], flags=re.I).strip()
+            _name_core = re.sub(
+                r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|Ph\.?D\.?)\b.*$',
+                '', _name_core, flags=re.I,
+            ).strip().lower()
+
+            # Step 1b — attempt specialty extraction from card text immediately.
+            # Card titles like "Orthodontist" or "Prosthodontist" are a reliable
+            # signal even when the card text is only 30-50 chars.  If found here,
+            # we skip the noisier full-page augmentation steps below.
+            _specialty = find_specialty(bio_text) if bio_text else ""
+            _assoc     = find_associations(bio_text) if bio_text else ""
+
+            # Step 2 — follow bio URL for richer individual-page data.
+            # Only fetch when card didn't already yield a specialty OR bio is short.
+            # Parse the fetched page and scope to this doctor's section to avoid
+            # contamination from site-wide navigation/banner keywords.
+            if bio_url and base_url and (not _specialty or len(bio_text) < 300):
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
                     try:
@@ -1481,54 +1549,50 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         time.sleep(DELAY_SEC)
                         bio_r = safe_get(full_bio)
                         if bio_r and len(bio_r.text) > 500:
-                            bio_text = (bio_text + " " + bio_r.text).strip().lower()
+                            _bio_soup = BeautifulSoup(bio_r.text, "lxml")
+                            # Try scoped extraction first; fall back to main content
+                            _scoped = _extract_doctor_scoped_text(_bio_soup, _name_core)
+                            if len(_scoped) > 80:
+                                bio_text = (bio_text + " " + _scoped).strip().lower()
+                            else:
+                                # Remove nav/header/footer to avoid site-wide noise
+                                for _noise in _bio_soup.find_all(["nav", "header", "footer"]):
+                                    _noise.decompose()
+                                _main = (_bio_soup.find(["main", "article"])
+                                         or _bio_soup.find("body") or _bio_soup)
+                                bio_text = (bio_text + " " + _main.get_text(
+                                    separator=" ", strip=True
+                                )[:4000]).strip().lower()
+                            _specialty = find_specialty(bio_text)
+                            _assoc     = find_associations(bio_text)
                     except Exception:
                         pass
 
             # Step 3 — search already-scraped soups for this doctor's bio page.
-            # Strip credentials from the name before matching so that
-            # "Laura Koberda, DDS" matches a page whose h1 says "Laura Koberda".
-            if _multi_doctor and len(bio_text) < 100 and all_soups_for_team:
-                _name_core = re.sub(
-                    r'^Dr\.?\s+', '', sec["name"], flags=re.I
-                ).strip()
-                _name_core = re.sub(
-                    r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|Ph\.?D\.?)\b.*$',
-                    '', _name_core, flags=re.I,
-                ).strip().lower()
-                _name_words = _name_core.split()
-                _last = _name_words[-1] if _name_words else ""
-                _first = _name_words[0] if _name_words else ""
+            # Use SCOPED text (heading container only) instead of full page text
+            # so that practice-wide keywords in navigation don't bleed across doctors.
+            if _multi_doctor and not _specialty and len(bio_text) < 100 and all_soups_for_team:
                 for _, _sp in all_soups_for_team:
-                    for _h in _sp.find_all(["h1", "h2", "h3", "h4"]):
-                        _h_lower = _h.get_text().lower()
-                        if _name_core in _h_lower or (
-                            len(_last) >= 5 and _last in _h_lower
-                        ) or (
-                            len(_first) >= 4 and len(_last) >= 5
-                            and _first in _h_lower and _last in _h_lower
-                        ):
-                            _pg = _sp.get_text(separator=" ", strip=True)
-                            if len(_pg) > 300:
-                                bio_text = _pg.lower()
-                            break
-                    if len(bio_text) >= 100:
+                    _scoped = _extract_doctor_scoped_text(_sp, _name_core)
+                    if len(_scoped) > 30:
+                        bio_text = (bio_text + " " + _scoped).strip().lower()
+                        _specialty = find_specialty(bio_text)
+                        _assoc     = find_associations(bio_text)
                         break
 
-            # Step 4/5 — decide source for specialty/associations
-            if _multi_doctor and len(bio_text) < 100:
-                # Cannot distinguish per-doctor data from shared practice text
+            # Step 4 — output per-doctor result.
+            # Blank if multi-doctor site and we found nothing specific to this doctor.
+            if _multi_doctor and not _specialty and not _assoc and len(bio_text) < 50:
                 doctors.append({
                     "name":         sec["name"],
                     "specialty":    "",
                     "associations": "",
                 })
             else:
-                _src = bio_text if len(bio_text) >= 50 else all_text
                 doctors.append({
                     "name":         sec["name"],
-                    "specialty":    find_specialty(_src),
-                    "associations": find_associations(_src),
+                    "specialty":    _specialty,
+                    "associations": _assoc,
                 })
         return doctors, hygienist_count
 
@@ -1540,13 +1604,9 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             deduped_norms.append(_normalize_name_for_dedup(n))
             deduped_names.append(n)
 
-    practice_specialty    = find_specialty(all_text)
-    practice_associations = find_associations(all_text)
-
     if deduped_names:
         return [
-            {"name": n, "specialty": practice_specialty,
-             "associations": practice_associations}
+            {"name": n, "specialty": "", "associations": ""}
             for n in deduped_names[:12]
         ], hygienist_count
 
