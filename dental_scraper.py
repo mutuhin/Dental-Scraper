@@ -1538,10 +1538,11 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             _assoc     = find_associations(bio_text) if bio_text else ""
 
             # Step 2 — follow bio URL for richer individual-page data.
-            # Only fetch when card didn't already yield a specialty OR bio is short.
+            # Only fetch when card text is missing specialty OR associations so we
+            # don't waste a request when the card already has everything we need.
             # Parse the fetched page and scope to this doctor's section to avoid
             # contamination from site-wide navigation/banner keywords.
-            if bio_url and base_url and (not _specialty or len(bio_text) < 300):
+            if bio_url and base_url and (not _specialty or not _assoc):
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
                     try:
@@ -1647,28 +1648,52 @@ def find_locations_count(text, soup):
 def find_associations(text):
     """Find dental associations / memberships in page text."""
     assoc_map = {
-        "AACD":  "American Academy of Cosmetic Dentistry",
-        "AACA":  "American Academy of Clear Aligners",
-        "AGD":   "Academy of General Dentistry",
+        # General / umbrella
         "ADA":   "American Dental Association",
-        "AAID":  "American Academy of Implant Dentistry",
+        "AGD":   "Academy of General Dentistry",
+        "FAGD":  "Fellow of the Academy of General Dentistry",
+        "MAGD":  "Master of the Academy of General Dentistry",
         "ABGD":  "American Board of General Dentistry",
-        "AAPD":  "American Academy of Pediatric Dentistry",
+        # Cosmetic / esthetic
+        "AACD":  "American Academy of Cosmetic Dentistry",
         "AAED":  "American Academy of Esthetic Dentistry",
+        "ABCD":  "American Board of Cosmetic Dentistry",
+        # Orthodontics
+        "AAO":   "American Association of Orthodontists",
+        "ABO":   "American Board of Orthodontics",
+        "AACA":  "American Academy of Clear Aligners",
+        # Endodontics
+        "AAE":   "American Association of Endodontists",
+        "ABE":   "American Board of Endodontists",
+        # Periodontics
+        "AAP":   "American Academy of Periodontology",
+        "ABP":   "American Board of Periodontology",
+        # Pediatric
+        "AAPD":  "American Academy of Pediatric Dentistry",
+        "ABPD":  "American Board of Pediatric Dentistry",
+        # Oral surgery / maxillofacial
         "AAOMS": "American Association of Oral and Maxillofacial Surgeons",
         "ABOMS": "American Board of Oral and Maxillofacial Surgery",
+        "ABOD":  "American Board of Oral and Maxillofacial Surgery",
+        # Prosthodontics
+        "ACP":   "American College of Prosthodontists",
+        "ABOP":  "American Board of Prosthodontics",
+        # Implantology
+        "AAID":  "American Academy of Implant Dentistry",
         "ICOI":  "International Congress of Oral Implantologists",
         "MICOI": "International Congress of Oral Implantologists",
         "FICOI": "Fellow of the International Congress of Oral Implantologists",
-        "FAGD":  "Fellow of the Academy of General Dentistry",
-        "MAGD":  "Master of the Academy of General Dentistry",
-        "FACD":  "Fellow of the American College of Dentists",
-        "FICD":  "Fellow of the International College of Dentists",
-        "ABCD":  "American Board of Cosmetic Dentistry",
-        "ABOD":  "American Board of Oral and Maxillofacial Surgery",
-        "ABPD":  "American Board of Pediatric Dentistry",
+        "ABOI":  "American Board of Oral Implantology",
         "AO":    "Academy of Osseointegration",
         "ITI":   "International Team for Implantology",
+        # Sleep / TMJ
+        "AADSM": "American Academy of Dental Sleep Medicine",
+        # Colleges / fellows
+        "FACD":  "Fellow of the American College of Dentists",
+        "FICD":  "Fellow of the International College of Dentists",
+        # Holistic / biological
+        "IABDM": "International Academy of Biological Dentistry and Medicine",
+        "IAOMT": "International Academy of Oral Medicine and Toxicology",
     }
     text_upper = text.upper()
     found = []
