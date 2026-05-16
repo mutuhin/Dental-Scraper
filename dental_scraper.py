@@ -1432,35 +1432,15 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                 combined_norms.append(_normalize_name_for_dedup(n))
                 all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
 
-    # ── Bio enrichment via name-context-window search ─────────────────────────
-    # For any doctor whose bio_text is very short (heading only, or from a
-    # listing page with no body content), search all_text for their name and
-    # extract a 600-char window that may contain associations / specialty.
-    # This handles Elementor/Divi pages, multi-location chains, and any layout
-    # where the heading and bio are not co-located in the same DOM container.
-    _all_text_lower = all_text.lower() if all_text else ""
-    for _sec in all_sections_combined:
-        if len(_sec.get("text", "")) >= 150:
-            continue  # already has decent bio content
-        # Build search keys: full name, and last-two-words (without "Dr.")
-        _raw_name = _sec["name"]
-        _name_stripped = re.sub(r'^Dr\.?\s+', '', _raw_name, flags=re.I).strip()
-        _name_words = _name_stripped.split()
-        _keys = [_raw_name.lower()]
-        if len(_name_words) >= 2:
-            _keys.append(" ".join(_name_words[-2:]).lower())
-        for _key in _keys:
-            _pos = _all_text_lower.find(_key)
-            if _pos < 0:
-                continue
-            # Grab up to 600 chars starting just before the name occurrence
-            _window = all_text[max(0, _pos - 30): _pos + 600]
-            if len(_window) > len(_key) + 100:
-                _sec["text"] = (_sec.get("text", "") + " " + _window).strip().lower()
-                break
-
     if all_sections_combined:
         # ── Follow each doctor's bio link for richer data ─────────────────────
+        # When multiple doctors share a page, only use bio_text that is
+        # genuinely scoped to that individual doctor (from _parse_team_page or
+        # their own bio URL). The old name-context-window approach grabbed a
+        # 600-char slice of all_text around each name, but because doctors are
+        # listed close together, all slices contained the same specialty/
+        # association keywords — making every doctor look like the first.
+        _multi_doctor = len(all_sections_combined) > 1
         doctors = []
         for sec in all_sections_combined:
             bio_text = sec["text"]
@@ -1479,11 +1459,24 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     except Exception:
                         pass
 
-            doctors.append({
-                "name":         sec["name"],
-                "specialty":    find_specialty(bio_text),
-                "associations": find_associations(bio_text),
-            })
+            # For multi-doctor practices with a short bio, we cannot tell
+            # which keywords belong to which doctor — return empty so the
+            # write loop shows "Not Found" rather than copying another
+            # doctor's data.  For single-doctor practices, fall back to
+            # all_text (the whole site = that one doctor's data).
+            if _multi_doctor and len(bio_text) < 100:
+                doctors.append({
+                    "name":         sec["name"],
+                    "specialty":    "",
+                    "associations": "",
+                })
+            else:
+                _src = bio_text if len(bio_text) >= 50 else all_text
+                doctors.append({
+                    "name":         sec["name"],
+                    "specialty":    find_specialty(_src),
+                    "associations": find_associations(_src),
+                })
         return doctors, hygienist_count
 
     # ── Fallback: names only (should rarely reach here) ────────────────────────
