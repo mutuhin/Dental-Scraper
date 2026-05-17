@@ -475,21 +475,38 @@ def _normalize_name_for_dedup(name: str) -> str:
 def _is_duplicate_doctor(name: str, kept_norms: list) -> bool:
     """
     Return True if 'name' is a variant already represented in kept_norms.
-    Uses subset-word matching so:
-      "Dr. Stacy Wince"  ≡  "Stacy Wince, DDS"  ≡  "Dr. Stacy L. Wince"
-    The longer (more complete) name wins.
+
+    Handles:
+    - Middle names/initials: "Dr. Stacy L. Wince" ≡ "Stacy Wince, DDS"
+    - First-name initials:   "J. Smith" ≡ "John Smith"
+    - Middle-name initials:  "John M. Smith" ≡ "John Michael Smith"
+    - Word-order variants:   "Smith John" ≡ "John Smith"
     """
     norm = _normalize_name_for_dedup(name)
-    words = set(norm.split())
-    if not words:
+    words = norm.split()
+    wset  = set(words)
+    if not wset:
         return False
     for kept in kept_norms:
-        kw = set(kept.split())
-        if not kw:
+        kwords = kept.split()
+        kset   = set(kwords)
+        if not kset:
             continue
-        # One is a word-subset of the other → same person
-        if words <= kw or kw <= words:
+        # 1. Word-set subset: handles middle names present in one but not the other,
+        #    and word-order variants (set equality is order-independent).
+        if wset <= kset or kset <= wset:
             return True
+        # 2. Same last name + compatible first name (handles initials and prefixes).
+        #    Require last name >= 4 chars to avoid false matches on short surnames.
+        if len(words) >= 2 and len(kwords) >= 2:
+            last  = words[-1]
+            klast = kwords[-1]
+            if last == klast and len(last) >= 4:
+                first  = words[0]
+                kfirst = kwords[0]
+                # first-name prefix/initial match: "J." vs "John", "Jon" vs "Jonathan"
+                if (first.startswith(kfirst) or kfirst.startswith(first)):
+                    return True
     return False
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1595,7 +1612,21 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     "specialty":    _specialty,
                     "associations": _assoc,
                 })
-        return doctors, hygienist_count
+
+        # Final dedup pass: sort by name completeness (most words first, then
+        # longest string) so the fullest name is always kept when two variants
+        # of the same person slipped through the per-page checks.
+        doctors.sort(
+            key=lambda d: (len(d["name"].split()), len(d["name"])),
+            reverse=True,
+        )
+        _final: list = []
+        _final_norms: list = []
+        for d in doctors:
+            if not _is_duplicate_doctor(d["name"], _final_norms):
+                _final_norms.append(_normalize_name_for_dedup(d["name"]))
+                _final.append(d)
+        return _final, hygienist_count
 
     # ── Fallback: names only (should rarely reach here) ────────────────────────
     deduped_names: list = []
@@ -3182,11 +3213,10 @@ def write_output(practices_data, output_path):
                 and (_has_comma_format or len(_own_words) == 2)
             )
             if _is_person:
-                owner_key = _normalize_name_for_dedup(owner_name)
-                already_present = any(
-                    _normalize_name_for_dedup(d.get("name", "")) == owner_key
-                    for d in doctors
-                )
+                _existing_norms = [
+                    _normalize_name_for_dedup(d.get("name", "")) for d in doctors
+                ]
+                already_present = _is_duplicate_doctor(owner_name, _existing_norms)
                 if not already_present:
                     doctors.insert(0, {
                         "name":         owner_name,
