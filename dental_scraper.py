@@ -3349,10 +3349,6 @@ def write_output(practices_data, output_path):
                         "specialty":    "",
                         "associations": "",
                     })
-                    # Remove "Not Found" placeholders now that a real name is present
-                    doctors = [d for d in doctors if d["name"] not in ("Not Found", "", None)]
-                    if not doctors:
-                        doctors = [{"name": owner_name, "specialty": "", "associations": ""}]
 
         for doc in doctors:
             rf = fills["row_alt"] if r_idx % 2 == 0 else fills["white"]
