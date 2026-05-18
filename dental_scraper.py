@@ -792,6 +792,25 @@ def _decode_cloudflare_email(encoded):
     return None
 
 
+_BAD_EMAIL_DOMAINS = frozenset({
+    "godaddy.com", "example.com", "yourdomain.com", "domain.com",
+    "yourwebsite.com", "website.com", "email.com", "test.com",
+    "placeholder.com", "sampleemail.com",
+})
+_BAD_EMAIL_PREFIXES = frozenset({
+    "filler", "placeholder", "test", "demo", "admin@example",
+    "info@example", "noreply", "no-reply", "donotreply",
+})
+
+def _is_bad_email(addr: str) -> bool:
+    addr_l = addr.lower().strip()
+    domain = addr_l.split("@")[-1] if "@" in addr_l else ""
+    return (
+        domain in _BAD_EMAIL_DOMAINS
+        or any(addr_l.startswith(p) for p in _BAD_EMAIL_PREFIXES)
+    )
+
+
 def find_email(text, soup):
     """Find email from mailto links, Cloudflare protection links, then plain text."""
     # Cloudflare email protection links
@@ -799,16 +818,16 @@ def find_email(text, soup):
         href = a.get("href", "")
         fragment = href.split("#")[-1] if "#" in href else ""
         decoded = _decode_cloudflare_email(fragment)
-        if decoded:
+        if decoded and not _is_bad_email(decoded):
             return decoded
 
     for a in soup.find_all("a", href=re.compile(r"mailto:", re.I)):
         addr = a["href"].replace("mailto:", "").split("?")[0].strip()
-        if "@" in addr:
+        if "@" in addr and not _is_bad_email(addr):
             return addr
 
     match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
-    if match:
+    if match and not _is_bad_email(match.group(0)):
         return match.group(0)
 
     for section in soup.find_all(
@@ -819,7 +838,7 @@ def find_email(text, soup):
             r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
             section.get_text(),
         )
-        if m:
+        if m and not _is_bad_email(m.group(0)):
             return m.group(0)
 
     return "Not Found"
@@ -843,11 +862,10 @@ def find_email_pw(website, page):
             m = re.search(
                 r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", content
             )
-            if m:
+            if m and not _is_bad_email(m.group(0)):
                 addr = m.group(0)
-                # Skip common false positives
                 if not any(skip in addr.lower() for skip in
-                           ["example.", "yourdomain.", "email@", "name@", "user@"]):
+                           ["email@", "name@", "user@"]):
                     return addr
             # Cloudflare email protection decode from Playwright HTML
             soup_pw = BeautifulSoup(content, "lxml")
@@ -855,7 +873,7 @@ def find_email_pw(website, page):
                 href = a.get("href", "")
                 fragment = href.split("#")[-1] if "#" in href else ""
                 decoded = _decode_cloudflare_email(fragment)
-                if decoded:
+                if decoded and not _is_bad_email(decoded):
                     return decoded
             # Also check innerText (catches obfuscated mailto links)
             try:
@@ -863,10 +881,10 @@ def find_email_pw(website, page):
                 m2 = re.search(
                     r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", inner
                 )
-                if m2:
+                if m2 and not _is_bad_email(m2.group(0)):
                     addr2 = m2.group(0)
                     if not any(skip in addr2.lower() for skip in
-                               ["example.", "yourdomain.", "email@", "name@", "user@"]):
+                               ["email@", "name@", "user@"]):
                         return addr2
             except Exception:
                 pass
@@ -2500,7 +2518,31 @@ def scrape_practice(row, pw_page=None):
                 try:
                     pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                     pw_page.wait_for_timeout(2500)
-                    pw_html = pw_page.content()
+                    try:
+                        pw_html = pw_page.content()
+                    except Exception:
+                        # Page still navigating (Cloudflare redirect chain) — wait longer
+                        pw_page.wait_for_timeout(3000)
+                        try:
+                            pw_html = pw_page.content()
+                        except Exception:
+                            pw_html = ""
+                    # Reject Cloudflare challenge pages — they have no real nav/content
+                    _pw_title = ""
+                    try:
+                        _pw_title = pw_page.title()
+                    except Exception:
+                        pass
+                    _is_cf_challenge = (
+                        "robot challenge" in _pw_title.lower()
+                        or "just a moment" in _pw_title.lower()
+                        or ("cloudflare" in pw_html.lower()
+                            and "challenge" in pw_html.lower()
+                            and len(pw_html) < 60000)
+                    )
+                    if _is_cf_challenge:
+                        log.info(f"   Playwright: Cloudflare challenge detected at {try_url} — skipping")
+                        continue
                     # Only accept if page loaded real content (not a DNS error page)
                     if len(pw_html) > 2000:
                         base_url = try_url
@@ -2628,14 +2670,37 @@ def scrape_practice(row, pw_page=None):
 
             lvl2_candidates = []
 
+            _pw_sub_count = [0]   # count Playwright sub-page fetches (capped to avoid slowness)
+            _PW_SUB_CAP = 8       # max Playwright sub-pages per site
+
             def _fetch_subpage(sub_url, page_label="sub"):
-                """Fetch one sub-page, merge text/soups/socials, cache it."""
+                """Fetch one sub-page, merge text/soups/socials, cache it.
+                Falls back to Playwright when safe_get fails and the homepage
+                was already loaded via Playwright (Cloudflare-blocked sites).
+                """
                 nonlocal all_text
                 log.info(f"   Sub-page ({page_label}): {sub_url}")
                 time.sleep(DELAY_SEC)
+                sub_html = None
                 sub_r = safe_get(sub_url)
                 if sub_r:
                     sub_html = sub_r.text
+                elif (pw_loaded_homepage and pw_page
+                        and page_label in ("nav", "kw")
+                        and _pw_sub_count[0] < _PW_SUB_CAP):
+                    # Site is Cloudflare-blocked — safe_get will always 403.
+                    # Use Playwright for nav/keyword pages only (up to cap).
+                    try:
+                        pw_page.goto(sub_url, timeout=PW_TIMEOUT,
+                                     wait_until="domcontentloaded")
+                        pw_page.wait_for_timeout(1500)
+                        _pw_html = pw_page.content()
+                        if len(_pw_html) > 500:
+                            sub_html = _pw_html
+                            _pw_sub_count[0] += 1
+                    except Exception as _e:
+                        log.debug(f"   Playwright sub-page failed {sub_url}: {_e}")
+                if sub_html:
                     all_text += " " + extract_text(sub_html)
                     sub_soup = BeautifulSoup(sub_html, "lxml")
                     all_scraped_soups.append((page_label, sub_soup))
@@ -3187,6 +3252,12 @@ def write_output(practices_data, output_path):
         raw_owner = str(inp.get("Practice Name") or "").strip()
         if raw_owner:
             owner_clean = _CRED_RE.sub("", raw_owner).strip(" ,.-")
+            # Strip corporate suffixes (PLLC, LLC, PC, Inc, Corp, PA)
+            _CORP_RE = re.compile(
+                r'\b(PLLC|LLC|PC|P\.C\.|Inc\.?|Corp\.?|PA|P\.A\.)\b',
+                re.IGNORECASE,
+            )
+            owner_clean = _CORP_RE.sub("", owner_clean).strip(" ,.-")
             # "Last, First" → "First Last"
             if "," in owner_clean:
                 parts = [p.strip() for p in owner_clean.split(",", 1)]
@@ -3223,6 +3294,10 @@ def write_output(practices_data, output_path):
                         "specialty":    "",
                         "associations": "",
                     })
+                    # Remove "Not Found" placeholders now that a real name is present
+                    doctors = [d for d in doctors if d["name"] not in ("Not Found", "", None)]
+                    if not doctors:
+                        doctors = [{"name": owner_name, "specialty": "", "associations": ""}]
 
         for doc in doctors:
             rf = fills["row_alt"] if r_idx % 2 == 0 else fills["white"]
