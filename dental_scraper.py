@@ -2659,12 +2659,67 @@ def scrape_practice(row, pw_page=None):
         # Track all scraped soups for doctor extraction
         all_scraped_soups: list = []   # list of (page_type, soup)
 
+        def _fetch_sitemap_urls() -> list:
+            """Try to fetch /sitemap.xml (and linked sub-sitemaps) and return
+            same-domain page URLs. Helps Wix/SPA sites where nav has no <a> tags."""
+            _sm_urls = []
+            _sm_seen: set = set()
+
+            def _parse_sm(xml_text: str):
+                import xml.etree.ElementTree as ET
+                try:
+                    root = ET.fromstring(xml_text)
+                except Exception:
+                    return
+                ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+                # sitemapindex — recurse into ALL child sitemaps (no cap)
+                # Prioritise "pages" sitemaps first since they contain content URLs.
+                child_locs = [sm.text.strip() for sm in root.findall("s:sitemap/s:loc", ns) if sm.text]
+                child_locs.sort(key=lambda u: (0 if "pages" in u else 1))
+                for child_url in child_locs:
+                    if child_url and child_url not in _sm_seen:
+                        _sm_seen.add(child_url)
+                        cr = safe_get(child_url)
+                        if cr:
+                            _parse_sm(cr.text)
+                # urlset — collect <loc> page URLs
+                for u in root.findall("s:url/s:loc", ns):
+                    loc = u.text.strip() if u.text else ""
+                    if not loc:
+                        continue
+                    if urlparse(loc).netloc != urlparse(base_url).netloc:
+                        continue
+                    if any(ext in loc.lower() for ext in _SKIP_EXTS):
+                        continue
+                    # Skip Wix member/account/login pages (not content pages)
+                    if any(s in loc.lower() for s in ("/m/", "/members/", "/login", "/reset", "/create-account")):
+                        continue
+                    _sm_urls.append(loc)
+
+            sm_r = safe_get(urljoin(base_url, "/sitemap.xml"))
+            if sm_r and sm_r.status_code == 200:
+                body = sm_r.text
+                if "<url" in body[:500] or "<sitemap" in body[:500]:
+                    _sm_seen.add(sm_r.url)
+                    _parse_sm(body)
+                    if _sm_urls:
+                        log.info(f"   Sitemap: found {len(_sm_urls)} pages at {sm_r.url}")
+            return _sm_urls
+
         if all_soup:
             sub_pages_found = set([base_url])
             # ── Nav links — always fetch ALL menu items, no cap ───────────────
             # These are the most important pages (services, team, technology,
             # about) and must never be skipped due to a page count limit.
             nav_urls = _collect_nav_links(all_soup, sub_pages_found)
+            # ── Sitemap links — catches Wix/SPA sites with no <a> nav tags ────
+            # Run after nav so we don't interfere with sub_pages_found tracking.
+            sitemap_urls = _fetch_sitemap_urls()
+            _nav_set = set(nav_urls)
+            for _su in sitemap_urls:
+                if _su not in _nav_set and _su not in sub_pages_found:
+                    nav_urls.append(_su)   # treat as nav-priority (uncapped)
+                    sub_pages_found.add(_su)
             # ── Keyword-matched links not already in nav ──────────────────────
             kw_urls  = _collect_subpage_links(all_soup, sub_pages_found)
 
