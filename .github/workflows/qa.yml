@@ -1,0 +1,102 @@
+name: QA Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Batch number to QA (must match a completed scraper run)'
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
+          - '9'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '20'
+          - '30'
+          - '40'
+          - '50'
+          - '60'
+        default: '1'
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout repo ───────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install openpyxl
+
+      # ── 4. Download deduped batch artifact ────────────────────────────────
+      - name: Download batch-${{ github.event.inputs.batch }}-deduped artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARTIFACT="batch-${{ github.event.inputs.batch }}-deduped"
+          echo "Looking for artifact: $ARTIFACT"
+          FOUND=0
+          for run_id in $(gh run list --workflow=scraper.yml --limit=30 \
+                            --json databaseId --jq '.[].databaseId'); do
+            TMP=$(mktemp -d)
+            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
+              FILE=$(find "$TMP" -name "*.xlsx" | head -1)
+              if [ -n "$FILE" ]; then
+                cp "$FILE" .
+                echo "Downloaded: $(basename $FILE)"
+                FOUND=1
+                break
+              fi
+            fi
+          done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: Could not find deduped artifact for batch ${{ github.event.inputs.batch }}"
+            echo "  Make sure the scraper workflow has completed for this batch."
+            exit 1
+          fi
+
+      # ── 5. Run QA check ────────────────────────────────────────────────────
+      - name: Run QA check on batch ${{ github.event.inputs.batch }}
+        run: |
+          INPUT=$(ls batch_*_deduped.xlsx 2>/dev/null | head -1)
+          if [ -z "$INPUT" ]; then
+            INPUT=$(ls batch_*.xlsx 2>/dev/null | head -1)
+          fi
+          if [ -z "$INPUT" ]; then
+            echo "ERROR: No xlsx file found to QA"
+            exit 1
+          fi
+          echo "Running QA on: $INPUT"
+          python3 qa_check.py "$INPUT"
+
+      # ── 6. Upload QA report ────────────────────────────────────────────────
+      - name: Upload QA report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-batch-${{ github.event.inputs.batch }}
+          path: qa_*.xlsx
+          retention-days: 30
+          overwrite: true
