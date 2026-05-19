@@ -68,17 +68,18 @@ OUTPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
 SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
 # In GitHub Actions (CI=true) use tighter limits so 100 practices finish in ~2.5h
 IS_CI        = os.environ.get("CI", "").lower() in ("true", "1")
-DELAY_SEC    = 1.5  if IS_CI else 2.5
+DELAY_SEC    = 0.5  if IS_CI else 2.5   # reduced in CI; politeness vs speed
 TIMEOUT      = 10   if IS_CI else 15
-PW_TIMEOUT   = 20000 if IS_CI else 25000
+PW_TIMEOUT   = 15000 if IS_CI else 25000  # 15s enough for dental sites; was 20s
 # Sub-page crawl limits.
 # NAV_LIMIT caps nav/menu links; SITEMAP_LIMIT caps sitemap-sourced URLs added
 # to the nav pass.  L1/L2/L3 cover keyword-matched and remaining same-domain links.
-NAV_LIMIT     = 20   if IS_CI else 60   # nav/menu links per practice
-SITEMAP_LIMIT = 15   if IS_CI else 40   # sitemap URLs merged into nav pass
-L1_LIMIT      = 25   if IS_CI else 60   # keyword links beyond nav (per practice)
-L2_LIMIT      = 15   if IS_CI else 40   # sub-pages of L1 pages
-L3_LIMIT      = 10   if IS_CI else 30   # any remaining same-domain links
+# L3 is disabled in CI (highest page count, lowest data yield).
+NAV_LIMIT     = 12   if IS_CI else 60   # nav/menu links per practice
+SITEMAP_LIMIT = 8    if IS_CI else 40   # sitemap URLs merged into nav pass
+L1_LIMIT      = 12   if IS_CI else 60   # keyword links beyond nav (per practice)
+L2_LIMIT      = 8    if IS_CI else 40   # sub-pages of L1 pages
+L3_LIMIT      = 0    if IS_CI else 30   # L3 skipped in CI (speculative, low yield)
 
 # Per-practice wall-clock timeout (seconds).
 # If a single site takes longer than this the scraper logs a warning, marks it
@@ -863,7 +864,7 @@ def find_email_pw(website, page):
         try:
             url = website.rstrip("/") + path
             page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(1000 if IS_CI else 3000)
             content = page.content()
             # Search in raw HTML first
             m = re.search(
@@ -1402,7 +1403,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             try:
                 log.info(f"   Doctor page (Playwright): {url}")
                 pw_page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                pw_page.wait_for_timeout(2500)
+                pw_page.wait_for_timeout(1000 if IS_CI else 2500)
                 pw_html = pw_page.content()
                 ts = BeautifulSoup(pw_html, "lxml")
                 secs = _parse_team_page_for_doctors(ts)
@@ -1422,7 +1423,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             try:
                 log.info(f"   Doctor page (Playwright base): {pw_url}")
                 pw_page.goto(pw_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                pw_page.wait_for_timeout(3000)
+                pw_page.wait_for_timeout(1000 if IS_CI else 3000)
                 pw_html = pw_page.content()
                 pw_soup = BeautifulSoup(pw_html, "lxml")
                 secs = _parse_team_page_for_doctors(pw_soup)
@@ -1562,7 +1563,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         _multi_doctor = len(all_sections_combined) > 1
         doctors = []
         _pw_bio_uses = 0          # cap Playwright bio fetches per practice
-        _PW_BIO_MAX  = 2 if IS_CI else 4
+        _PW_BIO_MAX  = 1 if IS_CI else 4   # CI: 1×15s; local: 4
         for sec in all_sections_combined:
             bio_text = sec["text"]
             bio_url  = sec.get("bio_url", "")
@@ -1632,7 +1633,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         _pw_bio_uses += 1
                         log.info(f"   Doctor bio (PW {_pw_bio_uses}/{_PW_BIO_MAX}): {full_bio}")
                         pw_page.goto(full_bio, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                        pw_page.wait_for_timeout(2000)
+                        pw_page.wait_for_timeout(800 if IS_CI else 2000)
                         _pw_bio_html = pw_page.content()
                         if len(_pw_bio_html) > 500:
                             _pw_bio_soup = BeautifulSoup(_pw_bio_html, "lxml")
@@ -1960,8 +1961,8 @@ def find_email_from_fb_about(fb_url, page):
         return None
     about_url = fb_url.rstrip("/") + "/about"
     try:
-        page.goto(about_url, timeout=25000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+        page.goto(about_url, timeout=15000 if IS_CI else 25000, wait_until="domcontentloaded")
+        page.wait_for_timeout(1500 if IS_CI else 3000)
         content = page.content()
         m = re.search(
             r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", content
@@ -1985,7 +1986,7 @@ def find_facebook_url_via_search(practice_name, city, state, pw_page):
     url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
     try:
         pw_page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-        pw_page.wait_for_timeout(2000)
+        pw_page.wait_for_timeout(1000 if IS_CI else 2000)
         content = pw_page.content()
         _FB_SKIP = ("share", "sharer", "login", "signup", "help", "policy",
                     "dialog", "tr.facebook", "l.facebook")
@@ -2141,7 +2142,7 @@ def get_facebook_stats_pw(url, page):
         return "Not Found", "Not Found"
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(2000 if IS_CI else 4000)
 
         content = page.content()
         text = extract_text(content)
@@ -2205,7 +2206,7 @@ def get_instagram_stats_pw(url, page):
         return "Not Found", "Not Found"
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(2000 if IS_CI else 4000)
 
         content = page.content()
 
@@ -2375,7 +2376,7 @@ def get_invisalign_tier_pw(practice_name, city, state, zip_code, page):
 
     try:
         page.goto(url, timeout=PW_TIMEOUT * 2, wait_until="networkidle")
-        page.wait_for_timeout(6000)
+        page.wait_for_timeout(3000 if IS_CI else 6000)
 
         # Try typing into the search box if it exists
         for selector in [
@@ -2390,7 +2391,7 @@ def get_invisalign_tier_pw(practice_name, city, state, zip_code, page):
                 if el.is_visible(timeout=2000):
                     el.fill(search_term)
                     el.press("Enter")
-                    page.wait_for_timeout(4000)
+                    page.wait_for_timeout(2000 if IS_CI else 4000)
                     break
             except Exception:
                 pass
@@ -2612,12 +2613,12 @@ def scrape_practice(row, pw_page=None):
             for try_url in urls_to_try:
                 try:
                     pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                    pw_page.wait_for_timeout(2500)
+                    pw_page.wait_for_timeout(1000 if IS_CI else 2500)
                     try:
                         pw_html = pw_page.content()
                     except Exception:
                         # Page still navigating (Cloudflare redirect chain) — wait longer
-                        pw_page.wait_for_timeout(3000)
+                        pw_page.wait_for_timeout(1500 if IS_CI else 3000)
                         try:
                             pw_html = pw_page.content()
                         except Exception:
@@ -2829,7 +2830,7 @@ def scrape_practice(row, pw_page=None):
             lvl2_candidates = []
 
             _pw_sub_count = [0]   # count Playwright sub-page fetches (capped to avoid slowness)
-            _PW_SUB_CAP = 8       # max Playwright sub-pages per site
+            _PW_SUB_CAP = 2 if IS_CI else 8   # CI: 2×15s=30s max; local: 8
 
             def _fetch_subpage(sub_url, page_label="sub"):
                 """Fetch one sub-page, merge text/soups/socials, cache it.
@@ -2851,7 +2852,7 @@ def scrape_practice(row, pw_page=None):
                     try:
                         pw_page.goto(sub_url, timeout=PW_TIMEOUT,
                                      wait_until="domcontentloaded")
-                        pw_page.wait_for_timeout(1500)
+                        pw_page.wait_for_timeout(800 if IS_CI else 1500)
                         _pw_html = pw_page.content()
                         if len(_pw_html) > 500:
                             sub_html = _pw_html
@@ -2966,7 +2967,7 @@ def scrape_practice(row, pw_page=None):
             log.info(f"   Rendering homepage with Playwright for JS content…")
             try:
                 pw_page.goto(base_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                pw_page.wait_for_timeout(2500)
+                pw_page.wait_for_timeout(1000 if IS_CI else 2500)
                 pw_html = pw_page.content()
                 pw_soup = BeautifulSoup(pw_html, "lxml")
                 # Merge JS-rendered text into all_text
@@ -2985,9 +2986,13 @@ def scrape_practice(row, pw_page=None):
                 log.debug(f"   Playwright homepage pass failed: {e}")
 
         # ── e2) Playwright render of service/treatment sub-pages (JS-rendered sites) ─
-        # Some sites load service lists dynamically; render up to 3 pages to enrich
-        # all_text so service keyword counts are accurate.
-        if pw_page and all_soup and base_url:
+        # Only fires when static scraping found few/no services (implies JS-rendered).
+        # Cap at 2 pages in CI to keep per-practice time bounded.
+        _svc_pw_cap = 2 if IS_CI else 10
+        _svc_already = sum(1 for k in ("invisalign","clear_aligners","veneers","implants",
+                                        "smile_makeovers","whitening","sedation","holistic",
+                                        "cancer_screening") if result.get(k))
+        if pw_page and all_soup and base_url and _svc_already < 2:
             _svc_pw_urls = []
             _seen_svc = set(sub_pages_found) if 'sub_pages_found' in dir() else set()
             for _a in all_soup.find_all("a", href=True):
@@ -2998,11 +3003,11 @@ def scrape_practice(row, pw_page=None):
                             and _full not in _seen_svc):
                         _svc_pw_urls.append(_full)
                         _seen_svc.add(_full)
-            for _svc_url in _svc_pw_urls[:10]:
+            for _svc_url in _svc_pw_urls[:_svc_pw_cap]:
                 try:
                     log.info(f"   Rendering service page (PW): {_svc_url}")
                     pw_page.goto(_svc_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                    pw_page.wait_for_timeout(2000)
+                    pw_page.wait_for_timeout(1000 if IS_CI else 2000)
                     _pw_svc_html = pw_page.content()
                     all_text += " " + extract_text(_pw_svc_html)
                     _sub_counter[0] += 1
