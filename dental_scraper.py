@@ -1560,6 +1560,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             # don't waste a request when the card already has everything we need.
             # Parse the fetched page and scope to this doctor's section to avoid
             # contamination from site-wide navigation/banner keywords.
+            _static_bio_thin = False   # track whether static fetch was empty (for PW fallback)
             if bio_url and base_url and (not _specialty or not _assoc):
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
@@ -1580,6 +1581,41 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                                 _main = (_bio_soup.find(["main", "article"])
                                          or _bio_soup.find("body") or _bio_soup)
                                 bio_text = (bio_text + " " + _main.get_text(
+                                    separator=" ", strip=True
+                                )[:4000]).strip().lower()
+                            _specialty = find_specialty(bio_text)
+                            _assoc     = find_associations(bio_text)
+                        else:
+                            _static_bio_thin = True
+                    except Exception:
+                        _static_bio_thin = True
+
+            # Step 2b — Playwright fallback for JS-rendered bio pages.
+            # Some sites load the bio in a modal/accordion only after a click;
+            # static requests return a minimal shell.  Use Playwright when:
+            #   • a bio URL exists, AND
+            #   • static fetch was thin (< 500 chars) OR still missing specialty/associations, AND
+            #   • Playwright is available
+            if (bio_url and pw_page and (not _specialty or not _assoc)
+                    and (_static_bio_thin or not _specialty)):
+                full_bio = urljoin(base_url, bio_url)
+                if urlparse(full_bio).netloc == urlparse(base_url).netloc:
+                    try:
+                        log.info(f"   Doctor bio (PW): {full_bio}")
+                        pw_page.goto(full_bio, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
+                        pw_page.wait_for_timeout(2000)
+                        _pw_bio_html = pw_page.content()
+                        if len(_pw_bio_html) > 500:
+                            _pw_bio_soup = BeautifulSoup(_pw_bio_html, "lxml")
+                            _scoped_pw = _extract_doctor_scoped_text(_pw_bio_soup, _name_core)
+                            if len(_scoped_pw) > 80:
+                                bio_text = (bio_text + " " + _scoped_pw).strip().lower()
+                            else:
+                                for _noise in _pw_bio_soup.find_all(["nav", "header", "footer"]):
+                                    _noise.decompose()
+                                _main_pw = (_pw_bio_soup.find(["main", "article"])
+                                            or _pw_bio_soup.find("body") or _pw_bio_soup)
+                                bio_text = (bio_text + " " + _main_pw.get_text(
                                     separator=" ", strip=True
                                 )[:4000]).strip().lower()
                             _specialty = find_specialty(bio_text)
@@ -1636,28 +1672,50 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
 def find_locations_count(text, soup):
     """
     Detect number of practice locations.
-    Looks for explicit 'X locations' or 'X offices' language.
-    Does NOT count raw address patterns (avoids false positives).
+    Looks for explicit 'X locations' or 'X offices' language, or counts
+    distinct address blocks on contact/about pages.
+    Uses \\d{1,2} (1-2 digit numbers only) to avoid matching 4-digit street
+    numbers like "4747" that appear before words like "office" in addresses.
     """
+    # Only match 1-2 digit numbers (real multi-location counts are < 30).
+    # This prevents "4747 Oak St offices" address fragments matching.
     explicit = re.search(
-        r"\b(\d+)\s+(?:convenient\s+)?(?:locations?|offices?|clinics?)\b",
+        r"\b(\d{1,2})\s+(?:convenient\s+)?(?:locations?|offices?|clinics?)\b",
         text,
         re.IGNORECASE,
     )
     if explicit:
         n = int(explicit.group(1))
-        return str(n) if n > 1 else "1"
+        # Validate plausible range: 2-25 locations
+        if 2 <= n <= 25:
+            return str(n)
+        elif n == 1:
+            return "1"
 
     multi_phrases = [
         "multiple locations", "multiple offices", "two locations",
-        "three locations", "all locations", "all offices", "our locations",
+        "three locations", "four locations", "five locations",
+        "all locations", "all offices", "our locations",
         "find a location", "find our offices",
+        "2 convenient", "3 convenient", "visit us at either",
+        "both of our", "all of our locations",
     ]
     for phrase in multi_phrases:
         if phrase in text.lower():
             return "Multiple"
 
-    # Check for a nav item labelled "Locations"
+    # Count distinct full address blocks (street + city pattern).
+    # Used to detect multi-location pages like /locations or /contact.
+    _addr_re = re.compile(
+        r'\b\d{2,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}'   # street number + name
+        r'\s*,\s*[A-Z][a-zA-Z\s]+,\s*[A-Z]{2}\s+\d{5}',      # city, ST ZIP
+        re.MULTILINE,
+    )
+    addr_blocks = _addr_re.findall(text)
+    if len(addr_blocks) >= 2:
+        return str(len(addr_blocks))
+
+    # Check for a nav item or link labelled "Locations"
     if soup.find("a", string=re.compile(r"^locations?$", re.I)):
         return "Multiple"
 
@@ -1723,13 +1781,56 @@ def find_associations(text):
     return ", ".join(found) if found else ""
 
 
+def _extract_specialty_phrase(text: str) -> str:
+    """
+    Extract a free-text specialty phrase from doctor bio text when the keyword
+    map yields nothing.  Looks for explicit self-description patterns like
+    "specializes in X", "areas of focus: X", "expertise in X", etc.
+    Returns a short cleaned string or "".
+    """
+    _FILLER = {
+        "dentistry", "dental care", "dental health", "patients", "all patients",
+        "our patients", "patient care", "the best care", "quality care",
+        "comprehensive care", "the community",
+    }
+    _PATTERNS = [
+        r'areas?\s+of\s+(?:specialty|specialization|focus|interest|expertise)[:\s]+([^.;\n]{5,90})',
+        r'specializ(?:es?|ing|ation)\s+in\s+([^.;\n]{5,80})',
+        r'specialty\s+(?:is\b|includes?\b|:)\s*([^.;\n]{5,70})',
+        r'specialist\s+in\s+([^.;\n]{5,70})',
+        r'board[- ]certified\s+([^.;\n]{5,70})',
+        r'focus(?:es?|ed|ing)?\s+(?:on|in)\s+([^.;\n]{5,70})',
+        r'expertise\s+in\s+([^.;\n]{5,70})',
+        r'interest(?:s|ed)?\s+in\s+([^.;\n]{5,70})',
+        r'trained\s+in\s+([^.;\n]{5,70})',
+        r'dedicated\s+to\s+([^.;\n]{5,60})',
+        r'passion(?:ate)?\s+(?:about|for)\s+([^.;\n]{5,60})',
+    ]
+    text_l = text.lower()
+    for pat in _PATTERNS:
+        m = re.search(pat, text_l, re.IGNORECASE)
+        if m:
+            phrase = m.group(1).strip().rstrip(' ,;.')
+            # Skip generic/unhelpful phrases
+            if len(phrase) < 5 or phrase.lower() in _FILLER:
+                continue
+            # Truncate at joining conjunctions so we get a clean clause
+            phrase = re.split(r'\s+(?:while|as well as|in addition|including)\s+', phrase)[0]
+            # Title-case and cap length
+            phrase = phrase[:80].strip()
+            if phrase:
+                return phrase.title() if phrase == phrase.lower() else phrase
+    return ""
+
+
 def find_specialty(text):
     """
     Detect all specialties mentioned in page text and return them joined with ' / '.
-    Uses short label names to produce output like:
-      "Cosmetic / Restorative / Laser"
-      "Cosmetic / Family (Invisalign Specialist)"
-      "Pediatric / General"
+
+    Strategy:
+      1. Keyword map → standardised labels like "Cosmetic / Restorative"
+      2. Free-text phrase extraction as fallback → e.g. "Biomimetic Dentistry"
+         (covers specialties not in the map that doctors describe in their bios)
     """
     # Ordered from most specific to most general so the list reads naturally
     specialty_map = [
@@ -1777,10 +1878,11 @@ def find_specialty(text):
             found.append(label)
             seen_labels.add(label)
 
-    if not found:
-        return ""
+    if found:
+        return " / ".join(found)
 
-    return " / ".join(found)
+    # Keyword map found nothing — try free-text phrase extraction from bio
+    return _extract_specialty_phrase(text)
 
 
 def find_social_links(soup):
@@ -1939,19 +2041,9 @@ def find_hygienists(text):
     if single_named:
         return str(len(single_named))
 
-    # Stage 3 — raw credential count: use a 60-char window (wider than before)
-    # around each RDH / "dental hygienist" mention as a dedup key so the same
-    # person listed on nav + body doesn't inflate the count.
-    windows: set = set()
-    for m in re.finditer(
-        r'\bR\.?D\.?H\.?\b|(?:registered|licensed)\s+dental\s+hygienist',
-        text, re.IGNORECASE,
-    ):
-        start = max(0, m.start() - 60)
-        key = text[start: m.start() + 60].strip().lower()
-        windows.add(key)
-    if windows:
-        return str(len(windows))
+    # Stage 3 removed: counting raw RDH window-snippets in concatenated multi-page
+    # text inflated the count when the same person appeared on several pages.
+    # The team-page name-based counting in scrape_doctors_full is authoritative.
 
     return ""
 
