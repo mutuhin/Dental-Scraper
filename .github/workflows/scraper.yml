@@ -38,14 +38,14 @@ on:
         required: false
         type: choice
         options:
-          - '300'    # 5 min  (default)
-          - '180'    # 3 min  (fast — skip slow sites aggressively)
+          - '180'    # 3 min  (default — fast, skips genuinely slow sites)
+          - '120'    # 2 min  (aggressive)
           - '240'    # 4 min
+          - '300'    # 5 min  (lenient)
           - '420'    # 7 min
-          - '600'    # 10 min (lenient)
-          - '900'    # 15 min (very lenient)
+          - '600'    # 10 min (very lenient)
           - '0'      # no limit
-        default: '300'
+        default: '180'
 
 jobs:
   scrape:

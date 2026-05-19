@@ -83,7 +83,7 @@ L3_LIMIT     = 20   if IS_CI else 30   # any remaining same-domain links
 # Override via the PRACTICE_TIMEOUT env-var (set by the workflow input).
 # Default in CI: 5 minutes (300 s).  Locally: no limit.
 _ENV_TIMEOUT     = os.environ.get("PRACTICE_TIMEOUT", "")
-PRACTICE_TIMEOUT = int(_ENV_TIMEOUT) if _ENV_TIMEOUT.isdigit() else (300 if IS_CI else 0)
+PRACTICE_TIMEOUT = int(_ENV_TIMEOUT) if _ENV_TIMEOUT.isdigit() else (180 if IS_CI else 0)
 
 import signal as _signal
 
@@ -1553,6 +1553,8 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         #   5. If single doctor: fall back to all_text (whole site = 1 doctor)
         _multi_doctor = len(all_sections_combined) > 1
         doctors = []
+        _pw_bio_uses = 0          # cap Playwright bio fetches per practice
+        _PW_BIO_MAX  = 2 if IS_CI else 4
         for sec in all_sections_combined:
             bio_text = sec["text"]
             bio_url  = sec.get("bio_url", "")
@@ -1607,17 +1609,20 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         _static_bio_thin = True
 
             # Step 2b — Playwright fallback for JS-rendered bio pages.
-            # Some sites load the bio in a modal/accordion only after a click;
-            # static requests return a minimal shell.  Use Playwright when:
-            #   • a bio URL exists, AND
-            #   • static fetch was thin (< 500 chars) OR still missing specialty/associations, AND
-            #   • Playwright is available
-            if (bio_url and pw_page and (not _specialty or not _assoc)
-                    and (_static_bio_thin or not _specialty)):
+            # Only fires when:
+            #   • the static bio fetch returned < 500 chars (truly empty shell), AND
+            #   • BOTH specialty AND associations are still missing, AND
+            #   • we haven't already used PW for 2 doctors this practice (cap)
+            # This avoids spending 20s per doctor on Playwright when static HTML
+            # already has enough text for extraction.
+            if (bio_url and pw_page and _static_bio_thin
+                    and not _specialty and not _assoc
+                    and _pw_bio_uses < _PW_BIO_MAX):
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
                     try:
-                        log.info(f"   Doctor bio (PW): {full_bio}")
+                        _pw_bio_uses += 1
+                        log.info(f"   Doctor bio (PW {_pw_bio_uses}/{_PW_BIO_MAX}): {full_bio}")
                         pw_page.goto(full_bio, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                         pw_page.wait_for_timeout(2000)
                         _pw_bio_html = pw_page.content()
