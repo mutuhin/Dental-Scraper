@@ -71,11 +71,14 @@ IS_CI        = os.environ.get("CI", "").lower() in ("true", "1")
 DELAY_SEC    = 1.5  if IS_CI else 2.5
 TIMEOUT      = 10   if IS_CI else 15
 PW_TIMEOUT   = 20000 if IS_CI else 25000
-# Sub-page crawl limits.  Nav links are ALWAYS fetched in full (no cap).
-# These limits apply only to keyword-matched and remaining pages beyond nav.
-L1_LIMIT     = 40   if IS_CI else 60   # keyword links beyond nav (per practice)
-L2_LIMIT     = 30   if IS_CI else 40   # sub-pages of L1 pages
-L3_LIMIT     = 20   if IS_CI else 30   # any remaining same-domain links
+# Sub-page crawl limits.
+# NAV_LIMIT caps nav/menu links; SITEMAP_LIMIT caps sitemap-sourced URLs added
+# to the nav pass.  L1/L2/L3 cover keyword-matched and remaining same-domain links.
+NAV_LIMIT     = 20   if IS_CI else 60   # nav/menu links per practice
+SITEMAP_LIMIT = 15   if IS_CI else 40   # sitemap URLs merged into nav pass
+L1_LIMIT      = 25   if IS_CI else 60   # keyword links beyond nav (per practice)
+L2_LIMIT      = 15   if IS_CI else 40   # sub-pages of L1 pages
+L3_LIMIT      = 10   if IS_CI else 30   # any remaining same-domain links
 
 # Per-practice wall-clock timeout (seconds).
 # If a single site takes longer than this the scraper logs a warning, marks it
@@ -2791,18 +2794,26 @@ def scrape_practice(row, pw_page=None):
 
         if all_soup:
             sub_pages_found = set([base_url])
-            # ── Nav links — always fetch ALL menu items, no cap ───────────────
-            # These are the most important pages (services, team, technology,
-            # about) and must never be skipped due to a page count limit.
+            # ── Nav links — capped at NAV_LIMIT in CI to control per-practice time ──
             nav_urls = _collect_nav_links(all_soup, sub_pages_found)
+            if len(nav_urls) > NAV_LIMIT:
+                log.info(f"   Nav links capped {len(nav_urls)} → {NAV_LIMIT}")
+                nav_urls = nav_urls[:NAV_LIMIT]
             # ── Sitemap links — catches Wix/SPA sites with no <a> nav tags ────
-            # Run after nav so we don't interfere with sub_pages_found tracking.
+            # Capped at SITEMAP_LIMIT to prevent massive sitemaps from blowing up
+            # per-practice time.
             sitemap_urls = _fetch_sitemap_urls()
             _nav_set = set(nav_urls)
+            _sm_added = 0
             for _su in sitemap_urls:
+                if _sm_added >= SITEMAP_LIMIT:
+                    break
                 if _su not in _nav_set and _su not in sub_pages_found:
-                    nav_urls.append(_su)   # treat as nav-priority (uncapped)
+                    nav_urls.append(_su)
                     sub_pages_found.add(_su)
+                    _sm_added += 1
+            if _sm_added:
+                log.info(f"   Sitemap: merged {_sm_added}/{len(sitemap_urls)} pages into nav pass")
             # ── Keyword-matched links not already in nav ──────────────────────
             kw_urls  = _collect_subpage_links(all_soup, sub_pages_found)
 
@@ -2852,7 +2863,7 @@ def scrape_practice(row, pw_page=None):
                     return sub_soup
                 return None
 
-            # ── Step 1: ALL nav/menu links (uncapped) ─────────────────────────
+            # ── Step 1: Nav/menu links (capped at NAV_LIMIT in CI) ───────────
             for sub_url in nav_urls:
                 sub_soup = _fetch_subpage(sub_url, "nav")
                 if sub_soup:
