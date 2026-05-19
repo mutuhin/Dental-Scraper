@@ -663,6 +663,9 @@ def safe_get(url, retries=2):
                 return None
             except Exception as e:
                 log.warning(f"  Attempt {attempt+1} failed for {url}: {e}")
+                # Connection timeouts mean the server is unreachable — no point retrying
+                if "ConnectTimeout" in type(e).__name__ or "ConnectionError" in type(e).__name__:
+                    return None
                 time.sleep(1)
                 break
     return None
@@ -2831,18 +2834,30 @@ def scrape_practice(row, pw_page=None):
             _pw_sub_count = [0]   # count Playwright sub-page fetches (capped to avoid slowness)
             _PW_SUB_CAP = 5 if IS_CI else 8   # CI: 5×15s=75s max for CF-blocked sites
 
+            # Consecutive-failure circuit breaker: if the last N sub-pages all
+            # failed with a connection error the site is unreachable/rate-limiting.
+            # Stop fetching further sub-pages immediately so we don't burn minutes
+            # on timeout retries for pages that will never load.
+            _subpage_fail_streak = [0]
+            _FAIL_STREAK_MAX = 3
+            _subpage_bail = [False]   # set True when streak exceeded
+
             def _fetch_subpage(sub_url, page_label="sub"):
                 """Fetch one sub-page, merge text/soups/socials, cache it.
                 Falls back to Playwright when safe_get fails and the homepage
                 was already loaded via Playwright (Cloudflare-blocked sites).
+                Returns None immediately if the circuit breaker has tripped.
                 """
                 nonlocal all_text
+                if _subpage_bail[0]:
+                    return None
                 log.info(f"   Sub-page ({page_label}): {sub_url}")
                 time.sleep(DELAY_SEC)
                 sub_html = None
-                sub_r = safe_get(sub_url)
+                sub_r = safe_get(sub_url, retries=1)  # circuit breaker handles repeated failures
                 if sub_r:
                     sub_html = sub_r.text
+                    _subpage_fail_streak[0] = 0   # reset streak on success
                 elif (pw_loaded_homepage and pw_page
                         and page_label in ("nav", "kw")
                         and _pw_sub_count[0] < _PW_SUB_CAP):
@@ -2856,8 +2871,21 @@ def scrape_practice(row, pw_page=None):
                         if len(_pw_html) > 500:
                             sub_html = _pw_html
                             _pw_sub_count[0] += 1
+                            _subpage_fail_streak[0] = 0
                     except Exception as _e:
                         log.debug(f"   Playwright sub-page failed {sub_url}: {_e}")
+                        _subpage_fail_streak[0] += 1
+                else:
+                    # requests failed and no Playwright fallback available
+                    _subpage_fail_streak[0] += 1
+
+                if _subpage_fail_streak[0] >= _FAIL_STREAK_MAX:
+                    log.warning(
+                        "   ⚡ %d consecutive sub-page failures — site unreachable, "
+                        "stopping sub-page crawl early", _FAIL_STREAK_MAX
+                    )
+                    _subpage_bail[0] = True
+
                 if sub_html:
                     all_text += " " + extract_text(sub_html)
                     sub_soup = BeautifulSoup(sub_html, "lxml")
@@ -2874,39 +2902,48 @@ def scrape_practice(row, pw_page=None):
 
             # ── Step 1: Nav/menu links (capped at NAV_LIMIT in CI) ───────────
             for sub_url in nav_urls:
+                if _subpage_bail[0]:
+                    break
                 sub_soup = _fetch_subpage(sub_url, "nav")
                 if sub_soup:
                     lvl2_candidates += _collect_subpage_links(sub_soup, sub_pages_found)
 
             # ── Step 2: Keyword-matched links beyond nav (L1_LIMIT cap) ───────
             for sub_url in kw_urls[:L1_LIMIT]:
+                if _subpage_bail[0]:
+                    break
                 sub_soup = _fetch_subpage(sub_url, "kw")
                 if sub_soup:
                     lvl2_candidates += _collect_subpage_links(sub_soup, sub_pages_found)
 
             # ── Level-2 sub-pages (up to L2_LIMIT, new unique pages only) ───────
             for sub_url in lvl2_candidates[:L2_LIMIT]:
+                if _subpage_bail[0]:
+                    break
                 _fetch_subpage(sub_url, "sub_l2")
 
             # ── Level-3 priority pass — crawl every remaining same-domain link
             # not yet visited in L1/L2. Capped at L3_LIMIT to stay reasonable.
-            _l3_seen = set(sub_pages_found)
-            _l3_urls = []
-            for _, _sp in [(None, all_soup)] + all_scraped_soups:
-                for _a in _sp.find_all("a", href=True):
-                    _full = urljoin(base_url, _a["href"])
-                    if (
-                        _full.startswith("http")
-                        and urlparse(_full).netloc == urlparse(base_url).netloc
-                        and _full not in _l3_seen
-                        and not any(ext in _full.lower() for ext in _SKIP_EXTS)
-                    ):
-                        _l3_urls.append(_full)
-                        _l3_seen.add(_full)
-            if _l3_urls:
-                log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to {L3_LIMIT}")
-            for _l3_url in _l3_urls[:L3_LIMIT]:
-                _fetch_subpage(_l3_url, "sub_l3")
+            if not _subpage_bail[0]:
+                _l3_seen = set(sub_pages_found)
+                _l3_urls = []
+                for _, _sp in [(None, all_soup)] + all_scraped_soups:
+                    for _a in _sp.find_all("a", href=True):
+                        _full = urljoin(base_url, _a["href"])
+                        if (
+                            _full.startswith("http")
+                            and urlparse(_full).netloc == urlparse(base_url).netloc
+                            and _full not in _l3_seen
+                            and not any(ext in _full.lower() for ext in _SKIP_EXTS)
+                        ):
+                            _l3_urls.append(_full)
+                            _l3_seen.add(_full)
+                if _l3_urls:
+                    log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to {L3_LIMIT}")
+                for _l3_url in _l3_urls[:L3_LIMIT]:
+                    if _subpage_bail[0]:
+                        break
+                    _fetch_subpage(_l3_url, "sub_l3")
 
         # ── d) Extract fields that need soup (testimonials, email) ─────────────
         if all_soup:
