@@ -77,6 +77,22 @@ L1_LIMIT     = 40   if IS_CI else 60   # keyword links beyond nav (per practice)
 L2_LIMIT     = 30   if IS_CI else 40   # sub-pages of L1 pages
 L3_LIMIT     = 20   if IS_CI else 30   # any remaining same-domain links
 
+# Per-practice wall-clock timeout (seconds).
+# If a single site takes longer than this the scraper logs a warning, marks it
+# skipped, and moves to the next practice.  0 = no limit.
+# Override via the PRACTICE_TIMEOUT env-var (set by the workflow input).
+# Default in CI: 5 minutes (300 s).  Locally: no limit.
+_ENV_TIMEOUT     = os.environ.get("PRACTICE_TIMEOUT", "")
+PRACTICE_TIMEOUT = int(_ENV_TIMEOUT) if _ENV_TIMEOUT.isdigit() else (300 if IS_CI else 0)
+
+import signal as _signal
+
+class _PracticeTimeout(Exception):
+    """Raised by SIGALRM when a practice scrape exceeds PRACTICE_TIMEOUT."""
+
+def _alarm_handler(signum, frame):
+    raise _PracticeTimeout()
+
 
 # ── Row-range control (0-based index into the practices list) ──
 # Examples:
@@ -3681,8 +3697,38 @@ def main():
                     write_output(all_results, OUTPUT_FILE)
                 continue
 
+            # ── Per-practice timeout (SIGALRM, Linux/macOS only) ─────────────
+            _use_alarm = PRACTICE_TIMEOUT > 0 and hasattr(_signal, "SIGALRM")
+            if _use_alarm:
+                _signal.signal(_signal.SIGALRM, _alarm_handler)
+                _signal.alarm(PRACTICE_TIMEOUT)
+
+            _practice_start = time.time()
             try:
                 scraped = scrape_practice(practice, pw_page=pw_page)
+
+            except _PracticeTimeout:
+                _took = int(time.time() - _practice_start)
+                log.warning(
+                    "  ⏱ TIMEOUT — %s exceeded %ds limit (%ds elapsed) — skipping",
+                    practice.get("Practice Name"), PRACTICE_TIMEOUT, _took,
+                )
+                scraped = dict(EMPTY_SCRAPED)
+                scraped["skip_reason"] = f"Timeout after {_took}s (limit {PRACTICE_TIMEOUT}s)"
+                # Playwright may be in a bad state after a mid-request interrupt;
+                # always reopen the page so the next practice starts clean.
+                if pw_context:
+                    try:
+                        if pw_page and not pw_page.is_closed():
+                            pw_page.close()
+                    except Exception:
+                        pass
+                    try:
+                        pw_page = pw_context.new_page()
+                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                    except Exception:
+                        pass
+
             except Exception as e:
                 log.error(f"  ERROR: {practice.get('Practice Name')}: {e}", exc_info=True)
                 scraped = dict(EMPTY_SCRAPED)
@@ -3708,6 +3754,11 @@ def main():
                         )
                         pw_page = pw_context.new_page()
                         pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+            finally:
+                # Always cancel the alarm so the next practice starts with a fresh timer
+                if _use_alarm:
+                    _signal.alarm(0)
 
             all_results.append((practice, scraped))
 

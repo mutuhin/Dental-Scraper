@@ -33,6 +33,19 @@ on:
         description: 'Optional: resume from this row (e.g. 95 to scrape only rows 95-100 of batch 1)'
         required: false
         default: ''
+      per_practice_timeout:
+        description: 'Max seconds per practice before skipping (0 = no limit). Default 300 = 5 min.'
+        required: false
+        type: choice
+        options:
+          - '300'    # 5 min  (default)
+          - '180'    # 3 min  (fast — skip slow sites aggressively)
+          - '240'    # 4 min
+          - '420'    # 7 min
+          - '600'    # 10 min (lenient)
+          - '900'    # 15 min (very lenient)
+          - '0'      # no limit
+        default: '300'
 
 jobs:
   scrape:
@@ -92,6 +105,8 @@ jobs:
 
       # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}
+        env:
+          PRACTICE_TIMEOUT: ${{ github.event.inputs.per_practice_timeout }}
         run: python run_batch.py ${{ github.event.inputs.batch }} ${{ github.event.inputs.start_row }}
 
       # ── 7. Upload xlsx as downloadable artifact ───────────────────────────
