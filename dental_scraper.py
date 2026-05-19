@@ -3646,7 +3646,7 @@ EMPTY_SCRAPED = {
     "invisalign": 0, "invisalign_tier": "N/A",
     "clear_aligners": 0, "veneers": 0, "implants": 0,
     "smile_makeovers": 0, "whitening": 0, "sedation": 0,
-    "holistic": 0, "cancer_screening": 0,
+    "holistic": 0, "dental_plan": "", "cancer_screening": 0,
     "doctors": [], "associations": "ERROR", "specialty": "ERROR",
     "google_rating": "ERROR", "google_reviews": "ERROR",
     "yelp_rating": "ERROR", "yelp_reviews": "ERROR",
