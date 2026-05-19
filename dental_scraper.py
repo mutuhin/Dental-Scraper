@@ -3541,6 +3541,11 @@ def main():
 
     all_results = []
 
+    # CI time budget: exit cleanly at 5h30m so GitHub's 6h hard kill never triggers.
+    # The upload steps run with `if: always()`, so partial output is still saved.
+    _run_start     = time.time()
+    _BUDGET_SECS   = 5.5 * 3600 if IS_CI else float("inf")
+
     # Open one Playwright browser for all practices (reuse = faster + less detection)
     pw_context = None
     pw_page    = None
@@ -3560,6 +3565,18 @@ def main():
 
     try:
         for i, practice in enumerate(practices, 1):
+            # ── Time-budget check ────────────────────────────────────────────
+            _elapsed = time.time() - _run_start
+            if _elapsed >= _BUDGET_SECS:
+                log.warning(
+                    "  Time budget reached (%.0f min elapsed) — stopping early "
+                    "so upload steps can save partial results. "
+                    "Re-run with start_row=%d to continue.",
+                    _elapsed / 60,
+                    practice.get("Index", i),
+                )
+                break
+
             log.info(f"[{i}/{len(practices)}] {practice.get('Practice Name')}")
 
             # Resume: load from cache if already scraped in a previous run
