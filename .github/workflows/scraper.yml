@@ -34,18 +34,17 @@ on:
         required: false
         default: ''
       per_practice_timeout:
-        description: 'Max seconds per practice before skipping (0 = no limit). Default 300 = 5 min.'
+        description: 'Max seconds per practice before skipping (saves partial data). Default 300 = 5 min.'
         required: false
         type: choice
         options:
-          - '180'    # 3 min  (default — fast, skips genuinely slow sites)
-          - '120'    # 2 min  (aggressive)
+          - '300'    # 5 min  (default — comprehensive scrape, saves partial on timeout)
+          - '180'    # 3 min  (fast — good for retries or small batches)
           - '240'    # 4 min
-          - '300'    # 5 min  (lenient)
-          - '420'    # 7 min
+          - '420'    # 7 min  (lenient — for very large sites)
           - '600'    # 10 min (very lenient)
           - '0'      # no limit
-        default: '180'
+        default: '300'
 
 jobs:
   scrape:

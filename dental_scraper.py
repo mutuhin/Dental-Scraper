@@ -66,28 +66,27 @@ except ImportError:
 INPUT_FILE   = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/6000 Data COMPLETE.xlsx"
 OUTPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
 SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
-# In GitHub Actions (CI=true) use tighter limits so 100 practices finish in ~2.5h
+# In GitHub Actions (CI=true) use tighter limits so 100 practices finish in ~3-4h
 IS_CI        = os.environ.get("CI", "").lower() in ("true", "1")
-DELAY_SEC    = 0.5  if IS_CI else 2.5   # reduced in CI; politeness vs speed
+DELAY_SEC    = 0.5  if IS_CI else 2.5   # short in CI — same pages, faster
 TIMEOUT      = 10   if IS_CI else 15
-PW_TIMEOUT   = 15000 if IS_CI else 25000  # 15s enough for dental sites; was 20s
+PW_TIMEOUT   = 15000 if IS_CI else 25000
 # Sub-page crawl limits.
 # NAV_LIMIT caps nav/menu links; SITEMAP_LIMIT caps sitemap-sourced URLs added
 # to the nav pass.  L1/L2/L3 cover keyword-matched and remaining same-domain links.
-# L3 is disabled in CI (highest page count, lowest data yield).
-NAV_LIMIT     = 12   if IS_CI else 60   # nav/menu links per practice
-SITEMAP_LIMIT = 8    if IS_CI else 40   # sitemap URLs merged into nav pass
-L1_LIMIT      = 12   if IS_CI else 60   # keyword links beyond nav (per practice)
-L2_LIMIT      = 8    if IS_CI else 40   # sub-pages of L1 pages
-L3_LIMIT      = 0    if IS_CI else 30   # L3 skipped in CI (speculative, low yield)
+NAV_LIMIT     = 20   if IS_CI else 60   # all menu items (dental sites have ~8-15)
+SITEMAP_LIMIT = 15   if IS_CI else 40   # extra pages for Wix/SPA sites
+L1_LIMIT      = 20   if IS_CI else 60   # keyword-matched pages (services, team, tech)
+L2_LIMIT      = 12   if IS_CI else 40   # sub-pages of keyword pages
+L3_LIMIT      = 8    if IS_CI else 30   # remaining same-domain links (low priority)
 
 # Per-practice wall-clock timeout (seconds).
-# If a single site takes longer than this the scraper logs a warning, marks it
-# skipped, and moves to the next practice.  0 = no limit.
+# If a single site takes longer than this the scraper logs a warning, saves
+# whatever partial data was collected, and moves to the next practice.
 # Override via the PRACTICE_TIMEOUT env-var (set by the workflow input).
-# Default in CI: 5 minutes (300 s).  Locally: no limit.
+# Default in CI: 5 minutes. Locally: no limit.
 _ENV_TIMEOUT     = os.environ.get("PRACTICE_TIMEOUT", "")
-PRACTICE_TIMEOUT = int(_ENV_TIMEOUT) if _ENV_TIMEOUT.isdigit() else (180 if IS_CI else 0)
+PRACTICE_TIMEOUT = int(_ENV_TIMEOUT) if _ENV_TIMEOUT.isdigit() else (300 if IS_CI else 0)
 
 import signal as _signal
 
@@ -1563,7 +1562,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         _multi_doctor = len(all_sections_combined) > 1
         doctors = []
         _pw_bio_uses = 0          # cap Playwright bio fetches per practice
-        _PW_BIO_MAX  = 1 if IS_CI else 4   # CI: 1×15s; local: 4
+        _PW_BIO_MAX  = 2 if IS_CI else 4   # CI: 2×15s for JS-rendered bio pages
         for sec in all_sections_combined:
             bio_text = sec["text"]
             bio_url  = sec.get("bio_url", "")
@@ -2830,7 +2829,7 @@ def scrape_practice(row, pw_page=None):
             lvl2_candidates = []
 
             _pw_sub_count = [0]   # count Playwright sub-page fetches (capped to avoid slowness)
-            _PW_SUB_CAP = 2 if IS_CI else 8   # CI: 2×15s=30s max; local: 8
+            _PW_SUB_CAP = 5 if IS_CI else 8   # CI: 5×15s=75s max for CF-blocked sites
 
             def _fetch_subpage(sub_url, page_label="sub"):
                 """Fetch one sub-page, merge text/soups/socials, cache it.
@@ -2988,7 +2987,7 @@ def scrape_practice(row, pw_page=None):
         # ── e2) Playwright render of service/treatment sub-pages (JS-rendered sites) ─
         # Only fires when static scraping found few/no services (implies JS-rendered).
         # Cap at 2 pages in CI to keep per-practice time bounded.
-        _svc_pw_cap = 2 if IS_CI else 10
+        _svc_pw_cap = 4 if IS_CI else 10
         _svc_already = sum(1 for k in ("invisalign","clear_aligners","veneers","implants",
                                         "smile_makeovers","whitening","sedation","holistic",
                                         "cancer_screening") if result.get(k))
