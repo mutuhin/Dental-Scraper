@@ -45,6 +45,14 @@ on:
           - '600'    # 10 min (very lenient)
           - '0'      # no limit
         default: '300'
+      force_fresh:
+        description: 'Force fresh re-scrape — ignore cached results (use when previous run had bad/incomplete data)'
+        required: false
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
 
 jobs:
   scrape:
@@ -85,6 +93,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "${{ github.event.inputs.force_fresh }}" = "true" ]; then
+            echo "force_fresh=true — skipping cache restore, all practices will be re-scraped"
+            exit 0
+          fi
           ARTIFACT="batch-${{ github.event.inputs.batch }}-cache"
           echo "Looking for artifact: $ARTIFACT"
           for run_id in $(gh run list --workflow=scraper.yml --limit=20 \
