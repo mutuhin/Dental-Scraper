@@ -93,6 +93,11 @@ import signal as _signal
 class _PracticeTimeout(Exception):
     """Raised by SIGALRM when a practice scrape exceeds PRACTICE_TIMEOUT."""
 
+# Holds a reference to the result dict currently being built by scrape_practice().
+# Updated at the start of each practice so the timeout handler can recover
+# whatever partial data was collected before the alarm fired.
+_current_partial_result: dict = {}
+
 def _alarm_handler(signum, frame):
     raise _PracticeTimeout()
 
@@ -2458,6 +2463,7 @@ def scrape_practice(row, pw_page=None):
     city    = str(row.get("City",          "")).strip()
     state   = str(row.get("State",         "")).strip()
     zip_c   = str(row.get("Zip",           "")).strip()
+    global _current_partial_result
     log.info(f"▶ Scraping: {name}")
 
     result = {
@@ -2509,6 +2515,9 @@ def scrape_practice(row, pw_page=None):
         "yelp_reviews":          "Not Found",
         "testimonials":          "0",
     }
+    # Keep a module-level reference so the SIGALRM timeout handler in main()
+    # can recover whatever partial data was scraped before the alarm fired.
+    _current_partial_result = result
 
     # ── helpers ───────────────────────────────────────────────────────────────
     practice_idx  = row.get("Index", 0)
@@ -3726,11 +3735,13 @@ def main():
             except _PracticeTimeout:
                 _took = int(time.time() - _practice_start)
                 log.warning(
-                    "  ⏱ TIMEOUT — %s exceeded %ds limit (%ds elapsed) — skipping",
+                    "  ⏱ TIMEOUT — %s exceeded %ds limit (%ds elapsed) — saving partial data",
                     practice.get("Practice Name"), PRACTICE_TIMEOUT, _took,
                 )
-                scraped = dict(EMPTY_SCRAPED)
-                scraped["skip_reason"] = f"Timeout after {_took}s (limit {PRACTICE_TIMEOUT}s)"
+                # Use whatever was collected before the alarm fired rather than
+                # discarding it — _current_partial_result is the live result dict.
+                scraped = dict(_current_partial_result)
+                scraped["skip_reason"] = f"Timeout after {_took}s (partial data saved)"
                 # Playwright may be in a bad state after a mid-request interrupt;
                 # always reopen the page so the next practice starts clean.
                 if pw_context:
