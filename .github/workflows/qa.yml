@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       batch:
-        description: 'Batch number to QA (must match a completed scraper run)'
+        description: 'Batch number to QA'
         required: true
         type: choice
         options:
@@ -29,6 +29,15 @@ on:
           - '50'
           - '60'
         default: '1'
+      source:
+        description: 'Which artifact to QA (deduped = scraper output; refresh = refresh-tech-services output)'
+        required: true
+        type: choice
+        options:
+          - 'deduped'
+          - 'refresh'
+          - 'any'
+        default: 'any'
 
 jobs:
   qa:
@@ -50,39 +59,74 @@ jobs:
       - name: Install dependencies
         run: pip install openpyxl
 
-      # ── 4. Download deduped batch artifact ────────────────────────────────
-      - name: Download batch-${{ github.event.inputs.batch }}-deduped artifact
+      # ── 4. Download best available artifact ───────────────────────────────
+      #
+      #  Priority order (tried in sequence until one is found):
+      #    1. refresh-tech-batch-N  (refresh_tech_services workflow output)
+      #    2. batch-N-deduped       (scraper workflow deduped output)
+      #    3. batch-N               (scraper workflow raw output)
+      #
+      #  The "source" input lets you pin to a specific type:
+      #    deduped → only try batch-N-deduped and batch-N
+      #    refresh → only try refresh-tech-batch-N
+      #    any     → try all three in priority order (default)
+      - name: Download artifact for batch ${{ github.event.inputs.batch }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ARTIFACT="batch-${{ github.event.inputs.batch }}-deduped"
-          echo "Looking for artifact: $ARTIFACT"
+          BATCH="${{ github.event.inputs.batch }}"
+          SOURCE="${{ github.event.inputs.source }}"
           FOUND=0
-          for run_id in $(gh run list --workflow=scraper.yml --limit=30 \
-                            --json databaseId --jq '.[].databaseId'); do
-            TMP=$(mktemp -d)
-            if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
-              FILE=$(find "$TMP" -name "*.xlsx" | head -1)
-              if [ -n "$FILE" ]; then
-                cp "$FILE" .
-                echo "Downloaded: $(basename $FILE)"
-                FOUND=1
-                break
+
+          # Build ordered list of artifact names to try
+          if [ "$SOURCE" = "refresh" ]; then
+            CANDIDATES="refresh-tech-batch-${BATCH}"
+          elif [ "$SOURCE" = "deduped" ]; then
+            CANDIDATES="batch-${BATCH}-deduped batch-${BATCH}"
+          else
+            CANDIDATES="refresh-tech-batch-${BATCH} batch-${BATCH}-deduped batch-${BATCH}"
+          fi
+
+          echo "Will try artifacts: $CANDIDATES"
+
+          # Search across recent runs of ALL workflows
+          ALL_RUN_IDS=$(gh run list --limit=50 --json databaseId --jq '.[].databaseId')
+
+          for ARTIFACT in $CANDIDATES; do
+            echo "--- Trying artifact: $ARTIFACT ---"
+            for run_id in $ALL_RUN_IDS; do
+              TMP=$(mktemp -d)
+              if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
+                FILE=$(find "$TMP" -name "*.xlsx" | head -1)
+                if [ -n "$FILE" ]; then
+                  cp "$FILE" .
+                  echo "✓ Downloaded: $(basename $FILE)  [from run $run_id, artifact $ARTIFACT]"
+                  FOUND=1
+                  break
+                fi
               fi
-            fi
+            done
+            [ "$FOUND" -eq 1 ] && break
           done
+
           if [ "$FOUND" -eq 0 ]; then
-            echo "ERROR: Could not find deduped artifact for batch ${{ github.event.inputs.batch }}"
-            echo "  Make sure the scraper workflow has completed for this batch."
+            echo ""
+            echo "ERROR: Could not find any artifact for batch $BATCH"
+            echo "  Tried: $CANDIDATES"
+            echo "  Run the scraper (or refresh-tech-services) workflow first."
             exit 1
           fi
 
       # ── 5. Run QA check ────────────────────────────────────────────────────
       - name: Run QA check on batch ${{ github.event.inputs.batch }}
         run: |
-          INPUT=$(ls batch_*_deduped.xlsx 2>/dev/null | head -1)
+          # Prefer deduped file; fall back to any xlsx
+          INPUT=$(ls *deduped*.xlsx 2>/dev/null | head -1)
           if [ -z "$INPUT" ]; then
-            INPUT=$(ls batch_*.xlsx 2>/dev/null | head -1)
+            INPUT=$(ls refresh_tech*.xlsx 2>/dev/null | head -1)
+          fi
+          if [ -z "$INPUT" ]; then
+            INPUT=$(ls *.xlsx 2>/dev/null | head -1)
           fi
           if [ -z "$INPUT" ]; then
             echo "ERROR: No xlsx file found to QA"
