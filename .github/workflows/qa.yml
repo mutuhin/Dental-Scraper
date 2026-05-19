@@ -99,8 +99,11 @@ jobs:
               if gh run download "$run_id" --name "$ARTIFACT" --dir "$TMP" 2>/dev/null; then
                 FILE=$(find "$TMP" -name "*.xlsx" | head -1)
                 if [ -n "$FILE" ]; then
-                  cp "$FILE" .
-                  echo "✓ Downloaded: $(basename $FILE)  [from run $run_id, artifact $ARTIFACT]"
+                  DEST="scraped_input_$(basename "$FILE")"
+                  cp "$FILE" "$DEST"
+                  echo "✓ Downloaded: $(basename $FILE) → $DEST  [from run $run_id, artifact $ARTIFACT]"
+                  # Pass exact filename to the next step via GITHUB_ENV
+                  echo "QA_INPUT_FILE=$DEST" >> "$GITHUB_ENV"
                   FOUND=1
                   break
                 fi
@@ -120,16 +123,12 @@ jobs:
       # ── 5. Run QA check ────────────────────────────────────────────────────
       - name: Run QA check on batch ${{ github.event.inputs.batch }}
         run: |
-          # Prefer deduped file; fall back to any xlsx
-          INPUT=$(ls *deduped*.xlsx 2>/dev/null | head -1)
-          if [ -z "$INPUT" ]; then
-            INPUT=$(ls refresh_tech*.xlsx 2>/dev/null | head -1)
-          fi
-          if [ -z "$INPUT" ]; then
-            INPUT=$(ls *.xlsx 2>/dev/null | head -1)
-          fi
-          if [ -z "$INPUT" ]; then
-            echo "ERROR: No xlsx file found to QA"
+          # Use the exact filename set by the download step.
+          # Never glob *.xlsx — the repo contains 6000 Data COMPLETE.xlsx which
+          # sorts before scraper output files and would be picked up by mistake.
+          INPUT="$QA_INPUT_FILE"
+          if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]; then
+            echo "ERROR: QA_INPUT_FILE not set or file missing (download step may have failed)"
             exit 1
           fi
           echo "Running QA on: $INPUT"
