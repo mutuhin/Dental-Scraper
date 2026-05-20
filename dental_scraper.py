@@ -978,9 +978,11 @@ _TEAM_LINK_TEXT = (
     "our dentist", "our doctor", "meet the team", "meet our team",
     "meet the doctor", "our team", "our provider", "our staff",
     "the team", "about the doctor", "our doctors",
+    "about us", "about our team", "our hygienist",
 )
 _TEAM_HREF_KW = ("doctor", "dentist", "team", "provider", "staff", "meet-the",
-                 "about-us", "about_us", "who-we-are", "our-doctor", "our-dentist")
+                 "about-us", "about_us", "who-we-are", "our-doctor", "our-dentist",
+                 "hygienist", "hygiene-team", "about")
 
 
 def _ascii_normalize(text: str) -> str:
@@ -1260,38 +1262,89 @@ def _parse_team_page_for_doctors(soup):
     return result[:30]
 
 
-def _count_hygienists_from_team(soup):
-    """Count distinct team members with hygienist titles on a team page."""
-    _HYG_TITLE_RE = re.compile(
-        r'\bR\.?D\.?H\.?\b|RDHAP|BSDH|'
-        r'registered\s+dental\s+hygienist|'
-        r'licensed\s+dental\s+hygienist|'
-        r'dental\s+hygienist',
-        re.IGNORECASE,
-    )
-    _NAME_RE = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)')
-    seen_names: set = set()
-    seen_keys: set = set()
+_HYG_CRED_RE = re.compile(
+    r'\bR\.?D\.?H\.?\b|RDHAP|BSDH|'
+    r'registered\s+dental\s+hygienist|'
+    r'licensed\s+dental\s+hygienist|'
+    r'dental\s+hygienist',
+    re.IGNORECASE,
+)
+_HYG_NAME_RE = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)\b')
+_HYG_SINGLE_RE = re.compile(
+    r'\b([A-Z][a-z]{2,})\s*,?\s*'
+    r'(?:R\.?D\.?H\.?|BSDH|RDHAP|'
+    r'registered\s+dental\s+hygienist|licensed\s+dental\s+hygienist|dental\s+hygienist)',
+    re.IGNORECASE,
+)
+
+
+def _extract_hyg_name(text):
+    """Return lowercase name key from a text snippet, or None."""
+    nm = _HYG_NAME_RE.search(text)
+    if nm:
+        return nm.group(1).strip().lower()
+    sn = _HYG_SINGLE_RE.search(text)
+    if sn:
+        return sn.group(1).strip().lower()
+    return None
+
+
+def _count_hygienists_from_team(soup, _seen=None):
+    """
+    Count distinct hygienists on a team/about page.
+
+    Two strategies, tried in order:
+      1. Container scan — finds card-like div/article/li/section elements
+         (20–700 chars) that contain a hygienist credential anywhere inside.
+         Extracts the name from the best heading within that container.
+         Catches the very common pattern:
+             <div class="team-card">
+               <h3>Jane Smith</h3>
+               <p>Dental Hygienist</p>
+             </div>
+      2. Inline scan — short elements (<200 chars) where name + credential
+         appear in the same text node.
+
+    Pass a shared `_seen` set to deduplicate across multiple soups.
+    """
+    if _seen is None:
+        _seen = set()
     count = 0
-    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "div", "li", "a", "strong", "b"]):
-        text = tag.get_text(strip=True)
-        if len(text) > 200:
+
+    # ── Strategy 1: container-based ──────────────────────────────────────────
+    for tag in soup.find_all(["article", "section", "li", "div"]):
+        raw = tag.get_text(" ", strip=True)
+        if not (20 < len(raw) < 700):
             continue
-        if not _HYG_TITLE_RE.search(text):
+        if not _HYG_CRED_RE.search(raw):
             continue
-        # Prefer name-based dedup so the same person in two tags counts once
-        nm = _NAME_RE.search(text)
-        if nm:
-            key = nm.group(1).strip().lower()
-            if key not in seen_names:
-                seen_names.add(key)
-                count += 1
-        else:
-            # No extractable name — use a short text window as key
-            key = re.sub(r"\s+", " ", text.strip().lower())[:60]
-            if key not in seen_keys:
-                seen_keys.add(key)
-                count += 1
+
+        # Prefer name from a heading inside the container
+        name_key = None
+        for htag in tag.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b"]):
+            htext = htag.get_text(strip=True)
+            name_key = _extract_hyg_name(htext)
+            if name_key:
+                break
+        if not name_key:
+            name_key = _extract_hyg_name(raw)
+
+        dedup_key = name_key or re.sub(r"\s+", " ", raw[:80].lower())
+        if dedup_key not in _seen:
+            _seen.add(dedup_key)
+            count += 1
+
+    # ── Strategy 2: same-element inline scan ─────────────────────────────────
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "li", "a", "strong", "b"]):
+        raw = tag.get_text(strip=True)
+        if len(raw) > 200 or not _HYG_CRED_RE.search(raw):
+            continue
+        name_key = _extract_hyg_name(raw)
+        dedup_key = name_key or re.sub(r"\s+", " ", raw[:60].lower())
+        if dedup_key not in _seen:
+            _seen.add(dedup_key)
+            count += 1
+
     return count
 
 
@@ -1448,74 +1501,12 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             _soups_to_check.append(_sp)
     if homepage_soup and homepage_soup not in _soups_to_check:
         _soups_to_check.append(homepage_soup)
-    _HYG_TITLE_RE2 = re.compile(
-        r'\bR\.?D\.?H\.?\b|RDHAP|BSDH|'
-        r'registered\s+dental\s+hygienist|'
-        r'licensed\s+dental\s+hygienist|'
-        r'dental\s+hygienist',
-        re.IGNORECASE,
-    )
-    _NAME_RE2 = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)')
-    _hyg_names: set = set()
-    _hyg_keys: set = set()
+
+    # Use a shared seen-set across all soups so the same person is only counted once
+    _hyg_seen: set = set()
     _hyg_total = 0
-    # Also match single first-name staff like "Dawn, RDH"
-    _SINGLE_NAME_RE2 = re.compile(
-        r'\b([A-Z][a-z]{2,})\s*,?\s+'
-        r'(?:R\.?D\.?H\.?|BSDH|RDHAP|'
-        r'registered\s+dental\s+hygienist|'
-        r'licensed\s+dental\s+hygienist|'
-        r'dental\s+hygienist)',
-        re.IGNORECASE,
-    )
     for _sp in _soups_to_check:
-        for _tag in _sp.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "div", "li", "a", "strong", "b"]):
-            _t = _tag.get_text(strip=True)
-            if not _HYG_TITLE_RE2.search(_t):
-                continue
-            if len(_t) > 200:
-                # Tag too long to use as a unit — regex-scan all credential
-                # snippets within it to avoid missing hygienists in big blocks
-                for _cm in _HYG_TITLE_RE2.finditer(_t):
-                    _snippet = _t[max(0, _cm.start()-80): _cm.start()+80]
-                    _nm2 = _NAME_RE2.search(_snippet)
-                    if _nm2:
-                        _nk2 = _nm2.group(1).strip().lower()
-                        if _nk2 not in _hyg_names:
-                            _hyg_names.add(_nk2)
-                            _hyg_total += 1
-                    else:
-                        _sn2 = _SINGLE_NAME_RE2.search(_snippet)
-                        if _sn2:
-                            _nk2 = _sn2.group(1).strip().lower()
-                            if _nk2 not in _hyg_names:
-                                _hyg_names.add(_nk2)
-                                _hyg_total += 1
-                        else:
-                            _key2 = re.sub(r"\s+", " ", _snippet.strip().lower())[:80]
-                            if _key2 not in _hyg_keys:
-                                _hyg_keys.add(_key2)
-                                _hyg_total += 1
-                continue
-            _nm = _NAME_RE2.search(_t)
-            if _nm:
-                _nk = _nm.group(1).strip().lower()
-                if _nk not in _hyg_names:
-                    _hyg_names.add(_nk)
-                    _hyg_total += 1
-            else:
-                # Try single-first-name match before falling back to key dedup
-                _sn = _SINGLE_NAME_RE2.search(_t)
-                if _sn:
-                    _nk = _sn.group(1).strip().lower()
-                    if _nk not in _hyg_names:
-                        _hyg_names.add(_nk)
-                        _hyg_total += 1
-                else:
-                    _key = re.sub(r"\s+", " ", _t.strip().lower())[:60]
-                    if _key not in _hyg_keys:
-                        _hyg_keys.add(_key)
-                        _hyg_total += 1
+        _hyg_total += _count_hygienists_from_team(_sp, _seen=_hyg_seen)
     if _hyg_total > 0:
         hygienist_count = _hyg_total
 
