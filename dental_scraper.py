@@ -1815,10 +1815,11 @@ def find_associations(text):
 
 def _extract_specialty_phrase(text: str) -> str:
     """
-    Extract a free-text specialty phrase from doctor bio text when the keyword
-    map yields nothing.  Looks for explicit self-description patterns like
-    "specializes in X", "areas of focus: X", "expertise in X", etc.
-    Returns a short cleaned string or "".
+    Extract a free-text specialty phrase from doctor bio text.
+    Only uses strong, explicit patterns — weak ones (dedicated to, passion for,
+    focus on, interest in, trained in) removed to prevent narrative sentences
+    from being stored as specialties.
+    Validates that the result contains a real dental/clinical term.
     """
     _FILLER = {
         "dentistry", "dental care", "dental health", "patients", "all patients",
@@ -1826,39 +1827,56 @@ def _extract_specialty_phrase(text: str) -> str:
         "comprehensive care", "the community",
     }
     _PATTERNS = [
-        # Certificate / training lists — most common on dental sites
         r'(?:earned?|completed?|received?|holds?|has)\s+certificate(?:s|ation)?\s+in\s+([^.;\n]{5,120})',
         r'certificate(?:s|ation)?\s+in\s+([^.;\n]{5,120})',
         r'certif(?:ied|ication)\s+in\s+([^.;\n]{5,100})',
         r'additional\s+training\s+in\s+([^.;\n]{5,100})',
         r'(?:advanced\s+)?training\s+in\s+([^.;\n]{5,100})',
         r'continuing\s+education\s+in\s+([^.;\n]{5,100})',
-        # Explicit specialty declarations
         r'areas?\s+of\s+(?:specialty|specialization|focus|interest|expertise)[:\s]+(?:include[s]?\s+)?([^.;\n]{5,90})',
         r'specializ(?:es?|ing|ation)\s+in\s+([^.;\n]{5,80})',
         r'specialty\s+(?:is\b|includes?\b|:)\s*([^.;\n]{5,70})',
         r'specialist\s+in\s+([^.;\n]{5,70})',
         r'board[- ]certified\s+(?:in\s+)?([^.;\n]{5,70})',
-        r'focus(?:es?|ed|ing)?\s+(?:on|in)\s+([^.;\n]{5,70})',
         r'expertise\s+in\s+([^.;\n]{5,70})',
-        r'special\s+interest\s+in\s+([^.;\n]{5,80})',
-        r'interest(?:s|ed)?\s+in\s+([^.;\n]{5,70})',
-        r'trained\s+in\s+([^.;\n]{5,70})',
-        r'dedicated\s+to\s+([^.;\n]{5,60})',
-        r'passion(?:ate)?\s+(?:about|for)\s+([^.;\n]{5,60})',
     ]
+    # Phrase must contain at least one specific dental/clinical specialty term
+    _VALID_SPEC = re.compile(
+        r'\b(implant|cosmetic|esthetic|orthodont|invisalign|aligner|'
+        r'periodon|endodon|prosthodon|oral\s+surg|pediat|'
+        r'sleep\s+apnea|tmj|root\s+canal|extract|veneer|whitening|'
+        r'crown|bridge|laser|sedation|restorat|preventi|preventa|'
+        r'biomimetic|holistic|biolog|clear\s+aligner|dental\s+implant)\b',
+        re.I,
+    )
+    # Reject phrases containing other doctor names, addresses, or generic mission text
+    _REJECT = re.compile(
+        r'\b(?:Dr\.|DDS|DMD|MD\b|C-FNP|NP\b|PA\b|LISW|LCSW|APRN|'
+        r'View\s+Profile|Healthsource|Schedule|Appointment|'
+        r'Aspects\b|Every\s+Age|Every\s+Patient|'
+        r'Highest\s+Standard|Highest\s+Level|Constant\s+Pursuit|'
+        r'Committed\s+To|Commitment\s+To|Continuing\s+Education\b|'
+        r'Patient\s+Care|Our\s+Team|Our\s+Practice|'
+        r'And\s+Is\s+Committ|And\s+Has\s+Spoken)\b',
+        re.I,
+    )
     text_l = text.lower()
     for pat in _PATTERNS:
         m = re.search(pat, text_l, re.IGNORECASE)
         if m:
             phrase = m.group(1).strip().rstrip(' ,;.')
-            # Skip generic/unhelpful phrases
             if len(phrase) < 5 or phrase.lower() in _FILLER:
                 continue
-            # Truncate at non-list joining conjunctions (not "and" since "X, Y, and Z" lists use it)
-            phrase = re.split(r'\s+(?:while|as well as|in addition to)\s+', phrase)[0]
-            # Cap length — allow up to 150 chars to preserve "X, Y, Z, and W" lists
+            phrase = re.split(
+                r'\s+(?:while|as well as|in addition to|for every|'
+                r'when\s+(?:he|she|they)\b|and\s+is\b|and\s+has\b|and\s+was\b)',
+                phrase, flags=re.I
+            )[0]
             phrase = phrase[:150].strip().rstrip(' ,;.')
+            if _REJECT.search(phrase):
+                continue
+            if not _VALID_SPEC.search(phrase):
+                continue
             if phrase:
                 return phrase.title() if phrase == phrase.lower() else phrase
     return ""

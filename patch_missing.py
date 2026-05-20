@@ -356,14 +356,26 @@ def _extract_specialty_phrase(text):
         r'specialty\s+(?:is\b|includes?\b|:)\s*([^.;\n]{5,70})',
         r'specialist\s+in\s+([^.;\n]{5,70})',
         r'board[- ]certified\s+(?:in\s+)?([^.;\n]{5,70})',
-        r'focus(?:es?|ed|ing)?\s+(?:on|in)\s+([^.;\n]{5,70})',
         r'expertise\s+in\s+([^.;\n]{5,70})',
-        r'special\s+interest\s+in\s+([^.;\n]{5,80})',
-        r'interest(?:s|ed)?\s+in\s+([^.;\n]{5,70})',
-        r'trained\s+in\s+([^.;\n]{5,70})',
-        r'dedicated\s+to\s+([^.;\n]{5,60})',
-        r'passion(?:ate)?\s+(?:about|for)\s+([^.;\n]{5,60})',
     ]
+    _VALID_SPEC = re.compile(
+        r'\b(implant|cosmetic|esthetic|orthodont|invisalign|aligner|'
+        r'periodon|endodon|prosthodon|oral\s+surg|pediat|'
+        r'sleep\s+apnea|tmj|root\s+canal|extract|veneer|whitening|'
+        r'crown|bridge|laser|sedation|restorat|preventi|preventa|'
+        r'biomimetic|holistic|biolog|clear\s+aligner|dental\s+implant)\b',
+        re.I,
+    )
+    _REJECT = re.compile(
+        r'\b(?:Dr\.|DDS|DMD|MD\b|C-FNP|NP\b|PA\b|LISW|LCSW|APRN|'
+        r'View\s+Profile|Healthsource|Schedule|Appointment|'
+        r'Aspects\b|Every\s+Age|Every\s+Patient|'
+        r'Highest\s+Standard|Highest\s+Level|Constant\s+Pursuit|'
+        r'Committed\s+To|Commitment\s+To|Continuing\s+Education\b|'
+        r'Patient\s+Care|Our\s+Team|Our\s+Practice|'
+        r'And\s+Is\s+Committ|And\s+Has\s+Spoken)\b',
+        re.I,
+    )
     text_l = text.lower()
     for pat in _PATTERNS:
         m = re.search(pat, text_l, re.IGNORECASE)
@@ -371,8 +383,16 @@ def _extract_specialty_phrase(text):
             phrase = m.group(1).strip().rstrip(' ,;.')
             if len(phrase) < 5 or phrase.lower() in _FILLER:
                 continue
-            phrase = re.split(r'\s+(?:while|as well as|in addition to)\s+', phrase)[0]
+            phrase = re.split(
+                r'\s+(?:while|as well as|in addition to|for every|'
+                r'when\s+(?:he|she|they)\b|and\s+is\b|and\s+has\b|and\s+was\b)',
+                phrase, flags=re.I
+            )[0]
             phrase = phrase[:150].strip().rstrip(' ,;.')
+            if _REJECT.search(phrase):
+                continue
+            if not _VALID_SPEC.search(phrase):
+                continue
             if phrase:
                 return phrase.title() if phrase == phrase.lower() else phrase
     return ""
