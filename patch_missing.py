@@ -464,11 +464,6 @@ def find_associations(text):
         "SPEAR":  "Spear Education",
         "PANKEY": "L.D. Pankey Institute",
     }
-    # Also catch free-text membership mentions
-    _MEMBER_PAT = re.compile(
-        r'(?:member|fellow|diplomate|affiliate)\s+of\s+(?:the\s+)?([A-Z][^.;\n]{5,80})',
-        re.I
-    )
 
     text_upper = text.upper()
     found = []
@@ -476,11 +471,36 @@ def find_associations(text):
         if re.search(rf'\b{re.escape(abbr)}\b', text_upper) or full.upper() in text_upper:
             found.append(abbr)
 
-    # Free-text fallback: "member of the American Dental Association"
+    # Free-text fallback — only fires when no abbreviations matched.
+    # Requires the phrase to contain a known org-type word AND not contain
+    # address/contact markers (digits, "reach out", "schedule", etc.).
     if not found:
+        _ORG_MARKER = re.compile(
+            r'\b(academy|association|society|college|institute|board|congress|'
+            r'federation|council|foundation|alliance|organization|university)\b',
+            re.I,
+        )
+        _MEMBER_PAT = re.compile(
+            r'(?:member|fellow|diplomate|affiliate)\s+of\s+(?:the\s+)?([^.;\n]{5,70})',
+            re.I,
+        )
+        _STOP = re.compile(
+            r'\s+\d'                                    # address / zip code
+            r'|\band\s+(?:has|is|was|he|she|they)\b'   # "and has spoken at…"
+            r'|\bwhere\b|\bwho\b|\bwhich\b'            # relative clause
+            r'|schedule|appointment|reach\s+out'       # contact-form noise
+            r'|our\s+team|your\s+care',
+            re.I,
+        )
         for m in _MEMBER_PAT.finditer(text):
-            org = m.group(1).strip().rstrip('.,;')
-            if len(org) > 5:
+            org = m.group(1)
+            # Truncate at stop markers
+            stop = _STOP.search(org)
+            if stop:
+                org = org[: stop.start()]
+            org = org.strip().rstrip('.,; ')
+            # Only keep if it looks like a real org name
+            if len(org) > 8 and _ORG_MARKER.search(org):
                 found.append(org)
 
     return ", ".join(found) if found else ""
