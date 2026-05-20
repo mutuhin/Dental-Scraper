@@ -72,6 +72,10 @@ on:
           - '59'
           - '60'
         default: '1'
+      run_id:
+        description: 'Optional: specific workflow run ID to pull the artifact from (paste the number from the Actions URL). Leave blank to use the latest batch-N artifact.'
+        required: false
+        default: ''
       skip_ratings:
         description: 'Skip Google ratings (just dedup)?'
         required: false
@@ -125,19 +129,32 @@ jobs:
           NEW_IP=$(curl -sf https://api.ipify.org || echo "unavailable")
           echo "Connected — public IP: $NEW_IP"
 
-      # ── Download the latest batch-N artifact ─────────────────────────────
+      # ── Download batch artifact ───────────────────────────────────────────
+      # If run_id is supplied, pull directly from that run (exact).
+      # Otherwise search for the latest batch-N artifact across all runs.
       - name: Download batch-${{ github.event.inputs.batch }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           BATCH="${{ github.event.inputs.batch }}"
+          RUN_ID="${{ github.event.inputs.run_id }}"
           mkdir -p input_dl
 
-          RESP=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=batch-${BATCH}&per_page=10" \
-            2>/dev/null || echo "")
+          if [ -n "$RUN_ID" ]; then
+            echo "run_id specified: downloading batch-${BATCH} artifact from run ${RUN_ID}"
+            if ! gh run download "$RUN_ID" --name "batch-${BATCH}" --dir input_dl/ 2>/dev/null; then
+              echo "Artifact 'batch-${BATCH}' not found in run ${RUN_ID}."
+              echo "Available artifacts in that run:"
+              gh run view "$RUN_ID" --json artifacts --jq '.artifacts[].name' 2>/dev/null || true
+              exit 1
+            fi
+          else
+            echo "No run_id — searching for latest batch-${BATCH} artifact across all runs"
+            RESP=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts?name=batch-${BATCH}&per_page=10" \
+              2>/dev/null || echo "")
 
-          ART_ID=$(echo "$RESP" | python3 -c "
+            ART_ID=$(echo "$RESP" | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
           arts = [a for a in d.get('artifacts',[]) if not a.get('expired', False)]
@@ -145,24 +162,25 @@ jobs:
               print(arts[0]['id'])
           " 2>/dev/null || echo "")
 
-          if [ -z "$ART_ID" ]; then
-            echo "ERROR: No artifact found for batch-${BATCH}"
-            exit 1
-          fi
+            if [ -z "$ART_ID" ]; then
+              echo "ERROR: No artifact found for batch-${BATCH}"
+              exit 1
+            fi
 
-          echo "Downloading artifact ID $ART_ID"
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
-            > input_dl/download.zip
-          unzip -q input_dl/download.zip -d input_dl/
-          rm -f input_dl/download.zip
+            echo "Downloading artifact ID $ART_ID"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
+              > input_dl/download.zip
+            unzip -q input_dl/download.zip -d input_dl/
+            rm -f input_dl/download.zip
+          fi
 
           XLSX=$(find input_dl -name "*.xlsx" | grep -v deduped | head -1)
           if [ -z "$XLSX" ]; then
-            echo "ERROR: No xlsx found in artifact"
+            echo "ERROR: No xlsx found in downloaded artifact"
             exit 1
           fi
           cp "$XLSX" input_batch.xlsx
-          echo "Downloaded: $XLSX"
+          echo "Downloaded: $(basename $XLSX)"
 
       # ── Deduplicate doctor names ──────────────────────────────────────────
       - name: Deduplicate doctor names
