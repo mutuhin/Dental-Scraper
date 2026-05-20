@@ -1826,13 +1826,22 @@ def _extract_specialty_phrase(text: str) -> str:
         "comprehensive care", "the community",
     }
     _PATTERNS = [
-        r'areas?\s+of\s+(?:specialty|specialization|focus|interest|expertise)[:\s]+([^.;\n]{5,90})',
+        # Certificate / training lists — most common on dental sites
+        r'(?:earned?|completed?|received?|holds?|has)\s+certificate(?:s|ation)?\s+in\s+([^.;\n]{5,120})',
+        r'certificate(?:s|ation)?\s+in\s+([^.;\n]{5,120})',
+        r'certif(?:ied|ication)\s+in\s+([^.;\n]{5,100})',
+        r'additional\s+training\s+in\s+([^.;\n]{5,100})',
+        r'(?:advanced\s+)?training\s+in\s+([^.;\n]{5,100})',
+        r'continuing\s+education\s+in\s+([^.;\n]{5,100})',
+        # Explicit specialty declarations
+        r'areas?\s+of\s+(?:specialty|specialization|focus|interest|expertise)[:\s]+(?:include[s]?\s+)?([^.;\n]{5,90})',
         r'specializ(?:es?|ing|ation)\s+in\s+([^.;\n]{5,80})',
         r'specialty\s+(?:is\b|includes?\b|:)\s*([^.;\n]{5,70})',
         r'specialist\s+in\s+([^.;\n]{5,70})',
-        r'board[- ]certified\s+([^.;\n]{5,70})',
+        r'board[- ]certified\s+(?:in\s+)?([^.;\n]{5,70})',
         r'focus(?:es?|ed|ing)?\s+(?:on|in)\s+([^.;\n]{5,70})',
         r'expertise\s+in\s+([^.;\n]{5,70})',
+        r'special\s+interest\s+in\s+([^.;\n]{5,80})',
         r'interest(?:s|ed)?\s+in\s+([^.;\n]{5,70})',
         r'trained\s+in\s+([^.;\n]{5,70})',
         r'dedicated\s+to\s+([^.;\n]{5,60})',
@@ -1846,10 +1855,10 @@ def _extract_specialty_phrase(text: str) -> str:
             # Skip generic/unhelpful phrases
             if len(phrase) < 5 or phrase.lower() in _FILLER:
                 continue
-            # Truncate at joining conjunctions so we get a clean clause
-            phrase = re.split(r'\s+(?:while|as well as|in addition|including)\s+', phrase)[0]
-            # Title-case and cap length
-            phrase = phrase[:80].strip()
+            # Truncate at non-list joining conjunctions (not "and" since "X, Y, and Z" lists use it)
+            phrase = re.split(r'\s+(?:while|as well as|in addition to)\s+', phrase)[0]
+            # Cap length — allow up to 150 chars to preserve "X, Y, Z, and W" lists
+            phrase = phrase[:150].strip().rstrip(' ,;.')
             if phrase:
                 return phrase.title() if phrase == phrase.lower() else phrase
     return ""
@@ -1878,7 +1887,7 @@ def find_specialty(text):
         ("Periodontics",    ["periodontist", "periodontal", "gum disease specialist"]),
         ("Endodontics",     ["endodontist", "root canal specialist"]),
         ("Oral Surgery",    ["oral surgeon", "oral surgery", "wisdom teeth removal",
-                             "jaw surgery", "maxillofacial"]),
+                             "third molar", "tooth extraction", "jaw surgery", "maxillofacial"]),
         ("Prosthodontics",  ["prosthodontist", "prosthodontic"]),
         ("TMJ / Sleep",     ["tmj", "sleep apnea", "sleep dentistry", "snoring treatment"]),
         ("Laser",           ["laser dent", "laser treatment", "laser therapy",
@@ -1910,11 +1919,20 @@ def find_specialty(text):
             found.append(label)
             seen_labels.add(label)
 
+    # Always try to extract a verbatim certificate/training phrase — these carry
+    # the doctor's own words (e.g. "implant dentistry, third molar extraction,
+    # sleep apnea, and clear aligners") which are more specific than category labels.
+    _phrase = _extract_specialty_phrase(text)
+
+    if found and _phrase:
+        # Combine: keyword categories + verbatim phrase (phrase takes priority as it
+        # contains the actual specialties listed by the doctor)
+        return _phrase
     if found:
         return " / ".join(found)
-
-    # Keyword map found nothing — try free-text phrase extraction from bio
-    return _extract_specialty_phrase(text)
+    if _phrase:
+        return _phrase
+    return "Not Found"
 
 
 def find_social_links(soup):
