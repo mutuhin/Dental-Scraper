@@ -144,6 +144,64 @@ _SOCIAL_UA_LIST = [
 _CFFI_PROFILES  = ["chrome124", "chrome136", "chrome133a", "safari260"]
 _CFFI_IG_PROF   = ["chrome124", "chrome136", "safari260"]
 
+# ── Playwright stealth script ─────────────────────────────────────────────────
+# Injected into every page via context.add_init_script() to hide automation
+# signals that Cloudflare and other bot-detection systems check for.
+_STEALTH_JS = """
+(function(){
+  // 1. Hide navigator.webdriver
+  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+  // 2. Realistic window.chrome object
+  window.chrome = {
+    app: { isInstalled: false, getDetails: function(){}, getIsInstalled: function(){},
+           runningState: function(){} },
+    csi: function(){}, loadTimes: function(){},
+    runtime: { OnInstalledReason: {}, PlatformArch: {}, PlatformNaclArch: {},
+               PlatformOs: {}, RequestUpdateCheckStatus: {} }
+  };
+
+  // 3. Realistic plugin list
+  const fakePlugins = [
+    { name: 'Chrome PDF Plugin',  filename: 'internal-pdf-viewer',               description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer',  filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',  description: '' },
+    { name: 'Native Client',      filename: 'internal-nacl-plugin',               description: '' },
+  ];
+  Object.defineProperty(navigator, 'plugins', { get: () => {
+    const arr = fakePlugins.map(p => Object.assign(Object.create(Plugin.prototype), p));
+    Object.setPrototypeOf(arr, PluginArray.prototype);
+    return arr;
+  }});
+
+  // 4. Languages
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+  // 5. Permissions — avoid "notifications" error that flags automation
+  try {
+    const _origQuery = window.navigator.permissions.query.bind(navigator.permissions);
+    window.navigator.permissions.query = (p) =>
+      p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : _origQuery(p);
+  } catch(e) {}
+
+  // 6. WebGL — spoof a real GPU so fingerprint looks human
+  try {
+    const _getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return _getParam.call(this, p);
+    };
+  } catch(e) {}
+
+  // 7. Hide automation-related properties
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+})();
+"""
+
 SERVICE_KEYWORDS = {
     # ── Invisalign ────────────────────────────────────────────────────────────
     "invisalign":            "Invisalign",
@@ -1376,7 +1434,7 @@ def _find_team_urls(homepage_soup, base_url):
 
 
 def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
-                        all_soups_for_team=None):
+                        all_soups_for_team=None, hint_team_url=None):
     """
     Find the practice's team/doctor page and return one dict per doctor.
     Each dict: {"name": str, "specialty": str, "associations": str}
@@ -1433,6 +1491,9 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
     # ── Also check team-specific URLs not yet in our soup list ────────────────
     # Skip network fetching when base_url is empty (offline/reprocess mode)
     team_urls = _find_team_urls(homepage_soup, base_url) if base_url else []
+    # Prepend any caller-supplied hint (e.g. /about-us/ passed via scrape_one.py)
+    if hint_team_url and hint_team_url not in team_urls:
+        team_urls.insert(0, hint_team_url)
     already_fetched_urls = set()
 
     # requests pass for any team URL not already covered
@@ -2652,7 +2713,7 @@ def scrape_practice(row, pw_page=None):
                             pw_html = pw_page.content()
                         except Exception:
                             pw_html = ""
-                    # Reject Cloudflare challenge pages — they have no real nav/content
+                    # Cloudflare JS challenge — wait for it to auto-solve (usually 5-8s)
                     _pw_title = ""
                     try:
                         _pw_title = pw_page.title()
@@ -2666,8 +2727,25 @@ def scrape_practice(row, pw_page=None):
                             and len(pw_html) < 60000)
                     )
                     if _is_cf_challenge:
-                        log.info(f"   Playwright: Cloudflare challenge detected at {try_url} — skipping")
-                        continue
+                        log.info(f"   Cloudflare challenge at {try_url} — waiting for auto-solve…")
+                        pw_page.wait_for_timeout(9000 if IS_CI else 12000)
+                        try:
+                            pw_html  = pw_page.content()
+                            _pw_title = pw_page.title()
+                        except Exception:
+                            pw_html = ""
+                        # Re-check after wait
+                        _is_cf_challenge = (
+                            "robot challenge" in _pw_title.lower()
+                            or "just a moment" in _pw_title.lower()
+                            or ("cloudflare" in pw_html.lower()
+                                and "challenge" in pw_html.lower()
+                                and len(pw_html) < 60000)
+                        )
+                        if _is_cf_challenge:
+                            log.info(f"   Cloudflare challenge did not resolve — skipping {try_url}")
+                            continue
+                        log.info(f"   Cloudflare challenge resolved at {try_url}")
                     # Only accept if page loaded real content (not a DNS error page)
                     if len(pw_html) > 2000:
                         base_url = try_url
@@ -3106,7 +3184,8 @@ def scrape_practice(row, pw_page=None):
         if all_soup:
             doctors, hyg_count = scrape_doctors_full(
                 all_soup, base_url, all_text, pw_page,
-                all_soups_for_team=all_scraped_soups
+                all_soups_for_team=all_scraped_soups,
+                hint_team_url=row.get("_hint_team_url", ""),
             )
             result["doctors"] = doctors
             # Doctor names fallback for display (comma-joined)
@@ -3755,12 +3834,19 @@ def main():
         log.info("  Launching Playwright browser (Chromium headless)…")
         _pw  = sync_playwright().__enter__()
         pw_context = _pw.chromium.launch_persistent_context(
-            user_data_dir="",                # ephemeral profile
+            user_data_dir="",
             headless=True,
-            ignore_https_errors=True,        # handles SSL cert mismatches
-            args=["--disable-blink-features=AutomationControlled"],
+            ignore_https_errors=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+                "--no-first-run",
+                "--disable-extensions",
+            ],
             user_agent=HEADERS["User-Agent"],
         )
+        pw_context.add_init_script(script=_STEALTH_JS)
         pw_page = pw_context.new_page()
         pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
 
