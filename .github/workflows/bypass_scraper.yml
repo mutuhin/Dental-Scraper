@@ -75,10 +75,14 @@ jobs:
         if: ${{ inputs.mode == 'batch' }}
         id: find_batch
         run: |
-          FILE=$(find batch_input/ -name "*.xlsx" | head -1)
+          FILE=$(find batch_input/ -name "*.xlsx" 2>/dev/null | head -1)
           if [ -z "$FILE" ]; then
-            echo "No batch artifact found — looking for local batch files"
+            echo "No batch artifact found in batch_input/"
             FILE=$(ls batch_${{ inputs.batch }}_*.xlsx 2>/dev/null | head -1)
+          fi
+          if [ -z "$FILE" ]; then
+            echo "::error::No batch Excel file found. Download the batch artifact first and provide its run_id."
+            exit 1
           fi
           echo "path=$FILE" >> $GITHUB_OUTPUT
           echo "Found: $FILE"
