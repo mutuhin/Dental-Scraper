@@ -55,21 +55,42 @@ jobs:
             --proxies proxies.txt \
             --output bypass_output.xlsx
 
-      # ── mode: batch — download artifact then run ───────────────────────
+      # ── mode: batch — find + download the right artifact ─────────────────
       - name: Download batch artifact
         if: ${{ inputs.mode == 'batch' }}
-        uses: actions/download-artifact@v4
-        with:
-          run-id: ${{ inputs.run_id != '' && inputs.run_id || github.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          name: >-
-            ${{
-              inputs.run_id != '' &&
-              format('batch-{0}-filled', inputs.batch) ||
-              format('batch-{0}-deduped', inputs.batch)
-            }}
-          path: batch_input/
-        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BATCH: ${{ inputs.batch }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          mkdir -p batch_input
+          # Try names in order: filled → deduped → plain batch
+          NAMES=("batch-${BATCH}-filled" "batch-${BATCH}-deduped" "batch-${BATCH}")
+
+          if [ -n "$RUN_ID" ]; then
+            # User specified exact run — try all name variants in that run
+            for NAME in "${NAMES[@]}"; do
+              if gh run download "$RUN_ID" --name "$NAME" --dir batch_input/ 2>/dev/null; then
+                echo "Downloaded '$NAME' from run $RUN_ID"
+                exit 0
+              fi
+            done
+            echo "::error::No matching artifact found in run $RUN_ID (tried: ${NAMES[*]})"
+            exit 1
+          else
+            # No run_id — search recent scraper runs automatically
+            for RUN in $(gh run list --workflow=scraper.yml --limit=20 \
+                           --json databaseId --jq '.[].databaseId'); do
+              for NAME in "${NAMES[@]}"; do
+                if gh run download "$RUN" --name "$NAME" --dir batch_input/ 2>/dev/null; then
+                  echo "Downloaded '$NAME' from run $RUN"
+                  exit 0
+                fi
+              done
+            done
+            echo "::error::No batch-${BATCH} artifact found in the last 20 scraper runs. Run the Dental Scraper for batch ${BATCH} first."
+            exit 1
+          fi
 
       - name: Find batch file
         if: ${{ inputs.mode == 'batch' }}
@@ -77,11 +98,7 @@ jobs:
         run: |
           FILE=$(find batch_input/ -name "*.xlsx" 2>/dev/null | head -1)
           if [ -z "$FILE" ]; then
-            echo "No batch artifact found in batch_input/"
-            FILE=$(ls batch_${{ inputs.batch }}_*.xlsx 2>/dev/null | head -1)
-          fi
-          if [ -z "$FILE" ]; then
-            echo "::error::No batch Excel file found. Download the batch artifact first and provide its run_id."
+            echo "::error::No xlsx found in batch_input/ after download."
             exit 1
           fi
           echo "path=$FILE" >> $GITHUB_OUTPUT
