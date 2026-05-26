@@ -13,8 +13,45 @@ from urllib.parse import urlparse
 from dental_scraper import (
     scrape_practice, write_output,
     USE_PLAYWRIGHT, PLAYWRIGHT_AVAILABLE,
-    HEADERS, _STEALTH_JS,
+    HEADERS,
 )
+
+_STEALTH_JS = """
+(function(){
+  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+  window.chrome = {
+    app:{ isInstalled:false, getDetails:function(){}, getIsInstalled:function(){}, runningState:function(){} },
+    csi:function(){}, loadTimes:function(){},
+    runtime:{ OnInstalledReason:{}, PlatformArch:{}, PlatformNaclArch:{}, PlatformOs:{}, RequestUpdateCheckStatus:{} }
+  };
+  const fp=[
+    {name:'Chrome PDF Plugin',  filename:'internal-pdf-viewer',              description:'Portable Document Format'},
+    {name:'Chrome PDF Viewer',  filename:'mhjfbmdgcfjbbpaeojofohoefgiehjai', description:''},
+    {name:'Native Client',      filename:'internal-nacl-plugin',              description:''},
+  ];
+  Object.defineProperty(navigator,'plugins',{get:()=>{
+    const a=fp.map(p=>Object.assign(Object.create(Plugin.prototype),p));
+    Object.setPrototypeOf(a,PluginArray.prototype); return a;
+  }});
+  Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+  try{
+    const oq=window.navigator.permissions.query.bind(navigator.permissions);
+    window.navigator.permissions.query=(p)=>
+      p.name==='notifications'?Promise.resolve({state:Notification.permission}):oq(p);
+  }catch(e){}
+  try{
+    const gp=WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter=function(p){
+      if(p===37445)return 'Intel Inc.';
+      if(p===37446)return 'Intel Iris OpenGL Engine';
+      return gp.call(this,p);
+    };
+  }catch(e){}
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+})();
+"""
 
 try:
     from playwright.sync_api import sync_playwright
