@@ -117,6 +117,11 @@ class _PracticeTimeout(Exception):
 # whatever partial data was collected before the alarm fired.
 _current_partial_result: dict = {}
 
+# Proxy call budget — reset per practice so a single heavily-blocked site
+# can't consume the proxy for hundreds of sub-pages and freeze the batch.
+_proxy_calls_remaining: list = [0]   # mutable so closures can mutate it
+_PROXY_CAP_PER_PRACTICE = 15         # homepage + sitemap + key pages ≈ 10-12
+
 def _alarm_handler(signum, frame):
     raise _PracticeTimeout()
 
@@ -644,38 +649,35 @@ def _is_cloudflare_block(r) -> bool:
 def _cffi_get(url) -> "requests.Response | None":
     """
     Try curl_cffi with rotating Chrome/Safari profiles to bypass bot protection.
-    Strategy 1: no proxy — fast, works for most Cloudflare JS challenges.
-    Strategy 2: Oxylabs proxy — used when IP is blocked (Sucuri ipr, Cloudflare IP ban).
+    Strategy 1: no proxy — single profile, fast fail.
+    Strategy 2: Oxylabs proxy — single attempt, 10s timeout, for IP-blocked sites.
     """
     if not _CFFI_AVAILABLE:
         return None
 
-    # Strategy 1: no proxy, rotate profiles
-    for profile in random.sample(_CFFI_PROFILES, min(3, len(_CFFI_PROFILES))):
+    # Strategy 1: no proxy, single profile (fail fast — don't burn time rotating)
+    try:
+        sess = cffi_requests.Session(impersonate=random.choice(_CFFI_PROFILES[:3]))
+        r = sess.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
+        if r.status_code == 200 and not _is_cloudflare_block(r):
+            log.info(f"   curl_cffi bypass succeeded: {url}")
+            return r
+    except Exception:
+        pass
+
+    # Strategy 2: proxy — short timeout, capped per practice to prevent batch freeze
+    if _BYPASS_PROXY and _proxy_calls_remaining[0] > 0:
+        _proxy_calls_remaining[0] -= 1
         try:
-            sess = cffi_requests.Session(impersonate=profile)
-            r = sess.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
+            sess = cffi_requests.Session(impersonate=random.choice(_CFFI_PROFILES[:3]))
+            r = sess.get(url, timeout=10, verify=False, allow_redirects=True,
+                         proxies={"http": _BYPASS_PROXY, "https": _BYPASS_PROXY})
             if r.status_code == 200 and not _is_cloudflare_block(r):
-                log.info(f"   curl_cffi bypass succeeded: {url}")
+                log.info(f"   curl_cffi+proxy bypass succeeded: {url}")
                 return r
-            break  # blocked — fall through to proxy
         except Exception:
-            continue
+            pass
 
-    # Strategy 2: proxy rotation (only if proxy is configured)
-    if _BYPASS_PROXY:
-        for profile in random.sample(_CFFI_PROFILES[:3], min(3, len(_CFFI_PROFILES[:3]))):
-            try:
-                sess = cffi_requests.Session(impersonate=profile)
-                r = sess.get(url, timeout=25, verify=False, allow_redirects=True,
-                             proxies={"http": _BYPASS_PROXY, "https": _BYPASS_PROXY})
-                if r.status_code == 200 and not _is_cloudflare_block(r):
-                    log.info(f"   curl_cffi+proxy bypass succeeded: {url}")
-                    return r
-            except Exception:
-                continue
-
-    log.warning(f"   curl_cffi failed for {url}")
     return None
 
 
@@ -2545,6 +2547,7 @@ def scrape_practice(row, pw_page=None):
     state   = str(row.get("State",         "")).strip()
     zip_c   = str(row.get("Zip",           "")).strip()
     global _current_partial_result
+    _proxy_calls_remaining[0] = _PROXY_CAP_PER_PRACTICE   # reset budget for this practice
     log.info(f"▶ Scraping: {name}")
 
     result = {

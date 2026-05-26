@@ -116,6 +116,7 @@ jobs:
 
       # ── 6. Run the batch ──────────────────────────────────────────────────
       - name: Run scraper batch ${{ github.event.inputs.batch }}
+        timeout-minutes: 300
         env:
           PRACTICE_TIMEOUT: ${{ github.event.inputs.per_practice_timeout }}
           OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
