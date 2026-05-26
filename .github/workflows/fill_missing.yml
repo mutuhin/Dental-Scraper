@@ -104,9 +104,15 @@ jobs:
       # ── Show what's missing before we start ───────────────────────────────
       - name: Show missing rows
         run: python3 patch_missing.py --show input_batch.xlsx
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
 
       # ── Scrape and fill ────────────────────────────────────────────────────
       - name: Fill missing Specialty & Memberships
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
         run: python3 patch_missing.py --fill input_batch.xlsx --output filled_output.xlsx
 
       # ── Upload result ──────────────────────────────────────────────────────

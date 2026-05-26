@@ -118,6 +118,8 @@ jobs:
       - name: Run scraper batch ${{ github.event.inputs.batch }}
         env:
           PRACTICE_TIMEOUT: ${{ github.event.inputs.per_practice_timeout }}
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
         run: python run_batch.py ${{ github.event.inputs.batch }} ${{ github.event.inputs.start_row }}
 
       # ── 7. Upload xlsx as downloadable artifact ───────────────────────────

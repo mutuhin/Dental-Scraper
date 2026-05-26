@@ -241,6 +241,9 @@ jobs:
 
       # ── Re-extract and produce comparison ─────────────────────────────────
       - name: Refresh Tech & Services from cache
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
         run: |
           python3 refresh_tech_services.py input.xlsx --cache-dir page_cache
 
