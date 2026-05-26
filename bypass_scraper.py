@@ -41,6 +41,7 @@ import sys
 import time
 import re
 import os
+from urllib.parse import urlparse
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -122,6 +123,23 @@ _STEALTH_JS = """
 # curl_cffi browser profiles to rotate through
 _CFFI_PROFILES = ["chrome136", "chrome124", "chrome133a", "chrome110", "safari260", "safari17_2"]
 
+# Markers that indicate a bot-challenge page was returned (even at HTTP 200)
+_CHALLENGE_MARKERS = (
+    "sgcaptcha", "robot challenge", "just a moment", "checking your browser",
+    "access denied", "please enable cookies", "enable javascript and cookies",
+)
+
+
+def _is_challenge_html(r):
+    """Return True if the response is a bot-challenge page regardless of status code."""
+    if r.status_code in (202, 403):
+        return True
+    url_lower = r.url.lower()
+    if "sgcaptcha" in url_lower or "captcha" in url_lower or "challenge" in url_lower:
+        return True
+    snippet = r.text[:2000].lower()
+    return any(m in snippet for m in _CHALLENGE_MARKERS)
+
 # ── Proxy pool ────────────────────────────────────────────────────────────────
 
 _proxy_pool: list = []
@@ -161,18 +179,19 @@ def _bypass_safe_get(url, retries=2):
         url = "https://" + url.lstrip("/")
 
     # ── Strategy 1: curl_cffi, no proxy ──────────────────────────────────────
+    # Do NOT pass ds.HEADERS — curl_cffi sets headers that match the impersonated
+    # browser profile; a mismatched User-Agent breaks the TLS fingerprint and gets blocked.
     if _CFFI_OK:
         profiles = random.sample(_CFFI_PROFILES, len(_CFFI_PROFILES))
         for profile in profiles:
             try:
                 sess = cffi_requests.Session(impersonate=profile)
-                r = sess.get(url, headers=ds.HEADERS, timeout=15,
-                             verify=False, allow_redirects=True)
-                if r.status_code == 200:
+                r = sess.get(url, timeout=15, verify=False, allow_redirects=True)
+                if r.status_code == 200 and not _is_challenge_html(r):
                     ds.log.info(f"   [bypass] curl_cffi/{profile} OK: {url}")
                     return r
-                if r.status_code == 403:
-                    break   # IP-blocked — move to proxy strategy
+                # 202 = Sucuri JS challenge; 403 = IP block — move to proxy
+                break
             except Exception:
                 continue
 
@@ -184,10 +203,9 @@ def _bypass_safe_get(url, retries=2):
             profile = random.choice(_CFFI_PROFILES[:3])
             try:
                 sess = cffi_requests.Session(impersonate=profile)
-                r = sess.get(url, headers=ds.HEADERS, timeout=15,
-                             verify=False, allow_redirects=True,
+                r = sess.get(url, timeout=25, verify=False, allow_redirects=True,
                              proxies={"http": proxy, "https": proxy})
-                if r.status_code == 200:
+                if r.status_code == 200 and not _is_challenge_html(r):
                     ds.log.info(f"   [bypass] curl_cffi/{profile}+proxy OK: {url}")
                     return r
                 if r.status_code in (407, 403):
@@ -201,6 +219,17 @@ def _bypass_safe_get(url, retries=2):
 
 
 # ── Playwright with stealth + optional proxy ──────────────────────────────────
+
+def _pw_proxy_dict(proxy_url):
+    """Convert http://user:pass@host:port to Playwright proxy dict."""
+    p = urlparse(proxy_url)
+    d = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        d["username"] = p.username
+    if p.password:
+        d["password"] = p.password
+    return d
+
 
 def _make_pw_context(pw, proxy_url=None):
     kwargs = dict(
@@ -216,7 +245,7 @@ def _make_pw_context(pw, proxy_url=None):
         user_agent=ds.HEADERS["User-Agent"],
     )
     if proxy_url:
-        kwargs["proxy"] = {"server": proxy_url}
+        kwargs["proxy"] = _pw_proxy_dict(proxy_url)
     ctx = pw.chromium.launch_persistent_context(**kwargs)
     ctx.add_init_script(script=_STEALTH_JS)
     return ctx
