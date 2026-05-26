@@ -1,0 +1,101 @@
+name: Bypass Scraper (Bot-Protected Sites)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Input mode"
+        required: true
+        type: choice
+        options:
+          - urls
+          - batch
+      urls:
+        description: "URLs to scrape (space-separated) — used when mode=urls"
+        required: false
+        default: ""
+      batch:
+        description: "Batch number (1-60) — used when mode=batch"
+        required: false
+        default: ""
+      run_id:
+        description: "GitHub run ID to download batch artifact from (optional)"
+        required: false
+        default: ""
+
+jobs:
+  bypass:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            openpyxl requests beautifulsoup4 lxml \
+            curl_cffi playwright
+          playwright install chromium --with-deps
+
+      - name: Write proxy file
+        run: |
+          echo "http://${{ secrets.OXYLABS_USER }}:${{ secrets.OXYLABS_PASS }}@pr.oxylabs.io:7777" > proxies.txt
+
+      # ── mode: urls ────────────────────────────────────────────────────────
+      - name: Run bypass (URLs mode)
+        if: ${{ inputs.mode == 'urls' }}
+        run: |
+          python bypass_scraper.py \
+            --urls ${{ inputs.urls }} \
+            --proxies proxies.txt \
+            --output bypass_output.xlsx
+
+      # ── mode: batch — download artifact then run ───────────────────────
+      - name: Download batch artifact
+        if: ${{ inputs.mode == 'batch' }}
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id != '' && inputs.run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: >-
+            ${{
+              inputs.run_id != '' &&
+              format('batch-{0}-filled', inputs.batch) ||
+              format('batch-{0}-deduped', inputs.batch)
+            }}
+          path: batch_input/
+        continue-on-error: true
+
+      - name: Find batch file
+        if: ${{ inputs.mode == 'batch' }}
+        id: find_batch
+        run: |
+          FILE=$(find batch_input/ -name "*.xlsx" | head -1)
+          if [ -z "$FILE" ]; then
+            echo "No batch artifact found — looking for local batch files"
+            FILE=$(ls batch_${{ inputs.batch }}_*.xlsx 2>/dev/null | head -1)
+          fi
+          echo "path=$FILE" >> $GITHUB_OUTPUT
+          echo "Found: $FILE"
+
+      - name: Run bypass (batch mode)
+        if: ${{ inputs.mode == 'batch' }}
+        run: |
+          python bypass_scraper.py \
+            --batch "${{ steps.find_batch.outputs.path }}" \
+            --proxies proxies.txt \
+            --output bypass_output.xlsx
+
+      # ── Upload result ─────────────────────────────────────────────────────
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bypass-batch-${{ inputs.batch != '' && inputs.batch || 'urls' }}-${{ github.run_number }}
+          path: bypass_output.xlsx
+          retention-days: 30
