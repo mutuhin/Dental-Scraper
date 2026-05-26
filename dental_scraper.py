@@ -44,6 +44,25 @@ try:
     _CFFI_AVAILABLE = True
 except ImportError:
     _CFFI_AVAILABLE = False
+
+# ── Proxy for bot-bypass (Oxylabs or any HTTP proxy) ─────────────────────────
+def _load_bypass_proxy() -> "str | None":
+    """Load proxy from OXYLABS_USER/OXYLABS_PASS env vars, or proxies.txt next to this file."""
+    import os as _os
+    user = _os.environ.get("OXYLABS_USER", "")
+    pwd  = _os.environ.get("OXYLABS_PASS", "")
+    if user and pwd:
+        return f"http://{user}:{pwd}@pr.oxylabs.io:7777"
+    _pf = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "proxies.txt")
+    if _os.path.exists(_pf):
+        with open(_pf) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#"):
+                    return _line
+    return None
+
+_BYPASS_PROXY: "str | None" = _load_bypass_proxy()
 import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -141,7 +160,7 @@ _SOCIAL_UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
-_CFFI_PROFILES  = ["chrome124", "chrome136", "chrome133a", "safari260"]
+_CFFI_PROFILES  = ["chrome136", "chrome124", "chrome133a", "chrome110", "safari260", "safari17_2"]
 _CFFI_IG_PROF   = ["chrome124", "chrome136", "safari260"]
 
 SERVICE_KEYWORDS = {
@@ -596,35 +615,67 @@ INVISALIGN_TIERS = [
 # HTTP UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
+_BOT_CHALLENGE_MARKERS = (
+    "sgcaptcha", "robot challenge", "just a moment", "checking your browser",
+    "cloudflare", "cf-ray", "enable javascript", "web server is returning an unknown error",
+)
+
+
 def _is_cloudflare_block(r) -> bool:
-    """Return True if the response looks like a Cloudflare challenge/block page."""
-    if r.status_code in (403, 429, 503):
+    """Return True if the response is a bot-challenge page (Cloudflare, Sucuri, etc.)."""
+    if r.status_code in (202, 403, 429, 503):
         return True
-    # Cloudflare error pages (520, 521, 522, 524 etc.) or JS challenge
     if r.status_code >= 500:
         ct = r.headers.get("Content-Type", "")
         if "text/html" in ct:
             snip = r.text[:2000].lower()
-            if any(kw in snip for kw in (
-                "cloudflare", "cf-ray", "just a moment", "checking your browser",
-                "enable javascript", "web server is returning an unknown error",
-            )):
+            if any(kw in snip for kw in _BOT_CHALLENGE_MARKERS):
                 return True
+    url_lower = getattr(r, "url", "").lower()
+    if "sgcaptcha" in url_lower or ("captcha" in url_lower and "challenge" in url_lower):
+        return True
+    if r.status_code == 200:
+        snip = r.text[:2000].lower()
+        if any(kw in snip for kw in _BOT_CHALLENGE_MARKERS):
+            return True
     return False
 
 
 def _cffi_get(url) -> "requests.Response | None":
-    """Try fetching url via curl_cffi (Chrome TLS impersonation) to bypass Cloudflare."""
+    """
+    Try curl_cffi with rotating Chrome/Safari profiles to bypass bot protection.
+    Strategy 1: no proxy — fast, works for most Cloudflare JS challenges.
+    Strategy 2: Oxylabs proxy — used when IP is blocked (Sucuri ipr, Cloudflare IP ban).
+    """
     if not _CFFI_AVAILABLE:
         return None
-    try:
-        r = cffi_requests.get(url, impersonate="chrome120", timeout=TIMEOUT)
-        if r.status_code == 200:
-            log.info(f"   curl_cffi bypass succeeded: {url}")
-            return r
-        log.warning(f"   curl_cffi got {r.status_code}: {url}")
-    except Exception as e:
-        log.warning(f"   curl_cffi failed for {url}: {e}")
+
+    # Strategy 1: no proxy, rotate profiles
+    for profile in random.sample(_CFFI_PROFILES, min(3, len(_CFFI_PROFILES))):
+        try:
+            sess = cffi_requests.Session(impersonate=profile)
+            r = sess.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
+            if r.status_code == 200 and not _is_cloudflare_block(r):
+                log.info(f"   curl_cffi bypass succeeded: {url}")
+                return r
+            break  # blocked — fall through to proxy
+        except Exception:
+            continue
+
+    # Strategy 2: proxy rotation (only if proxy is configured)
+    if _BYPASS_PROXY:
+        for profile in random.sample(_CFFI_PROFILES[:3], min(3, len(_CFFI_PROFILES[:3]))):
+            try:
+                sess = cffi_requests.Session(impersonate=profile)
+                r = sess.get(url, timeout=25, verify=False, allow_redirects=True,
+                             proxies={"http": _BYPASS_PROXY, "https": _BYPASS_PROXY})
+                if r.status_code == 200 and not _is_cloudflare_block(r):
+                    log.info(f"   curl_cffi+proxy bypass succeeded: {url}")
+                    return r
+            except Exception:
+                continue
+
+    log.warning(f"   curl_cffi failed for {url}")
     return None
 
 
@@ -2666,7 +2717,19 @@ def scrape_practice(row, pw_page=None):
                             and len(pw_html) < 60000)
                     )
                     if _is_cf_challenge:
-                        log.info(f"   Playwright: Cloudflare challenge detected at {try_url} — skipping")
+                        # Playwright can't solve this — try curl_cffi with proxy
+                        log.info(f"   Playwright: challenge at {try_url} — trying curl_cffi bypass…")
+                        _proxy_r = _cffi_get(try_url)
+                        if _proxy_r and len(_proxy_r.text) > 2000:
+                            pw_html  = _proxy_r.text
+                            base_url = try_url
+                            all_soup = BeautifulSoup(pw_html, "lxml")
+                            all_text = extract_text(pw_html)
+                            pw_loaded_homepage = True
+                            _merge_socials(all_soup, pw_html)
+                            _cache("homepage", try_url, pw_html)
+                            log.info(f"   curl_cffi bypass loaded: {try_url}")
+                            break
                         continue
                     # Only accept if page loaded real content (not a DNS error page)
                     if len(pw_html) > 2000:
