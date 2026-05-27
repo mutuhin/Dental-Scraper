@@ -75,6 +75,10 @@ on:
           - '59'
           - '60'
         default: '1'
+      run_id:
+        description: 'Optional: specific run ID to pull artifacts from (leave blank to auto-find latest)'
+        required: false
+        default: ''
 
 jobs:
   refresh:
@@ -130,12 +134,100 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           BATCH="${{ github.event.inputs.batch }}"
+          RUN_ID="${{ github.event.inputs.run_id }}"
           mkdir -p input_xlsx
+          NAMES=("google-ratings-batch-${BATCH}" "batch-${BATCH}-deduped" "batch-${BATCH}")
+          FOUND=0
 
-          for ARTIFACT_NAME in "google-ratings-batch-${BATCH}" "batch-${BATCH}-deduped" "batch-${BATCH}"; do
-            echo "Trying artifact: $ARTIFACT_NAME"
+          if [ -n "$RUN_ID" ]; then
+            # ── Specific run ID provided — pull directly from that run ──────
+            echo "Using specified run ID: $RUN_ID"
+            for NAME in "${NAMES[@]}"; do
+              echo "Trying: $NAME from run $RUN_ID"
+              if gh run download "$RUN_ID" --name "$NAME" --dir input_xlsx/ 2>/dev/null; then
+                XLSX=$(find input_xlsx -name "*.xlsx" | head -1)
+                if [ -n "$XLSX" ]; then
+                  cp "$XLSX" input.xlsx
+                  echo "Downloaded: $XLSX (from run $RUN_ID / $NAME)"
+                  FOUND=1
+                  break
+                fi
+              fi
+            done
+            if [ "$FOUND" = "0" ]; then
+              echo "ERROR: No xlsx artifact found in run $RUN_ID (tried: ${NAMES[*]})"
+              exit 1
+            fi
+          else
+            # ── No run ID — search all runs for the latest artifact ─────────
+            for ARTIFACT_NAME in "${NAMES[@]}"; do
+              echo "Trying artifact: $ARTIFACT_NAME"
+              PAGE=1
+              while true; do
+                RESP=$(gh api \
+                  "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100&page=${PAGE}" \
+                  2>/dev/null || echo "")
+                [ -z "$RESP" ] && break
+                COUNT=$(echo "$RESP" | python3 -c \
+                  "import sys,json; d=json.load(sys.stdin); print(len(d.get('artifacts',[])))" 2>/dev/null || echo "0")
+                [ "$COUNT" = "0" ] && break
+
+                ART_ID=$(echo "$RESP" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          arts = [a for a in d.get('artifacts',[]) if not a.get('expired', False)]
+          if arts:
+              print(arts[0]['id'])
+          " 2>/dev/null || echo "")
+
+                if [ -n "$ART_ID" ]; then
+                  if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
+                       > input_xlsx/download.zip 2>/dev/null; then
+                    unzip -q input_xlsx/download.zip -d input_xlsx/ 2>/dev/null || true
+                    rm -f input_xlsx/download.zip
+                    XLSX=$(find input_xlsx -name "*.xlsx" | head -1)
+                    if [ -n "$XLSX" ]; then
+                      cp "$XLSX" input.xlsx
+                      echo "Downloaded: $XLSX (from $ARTIFACT_NAME)"
+                      FOUND=1
+                      break 2
+                    fi
+                  fi
+                fi
+                [ "$COUNT" -lt 100 ] && break
+                PAGE=$((PAGE + 1))
+              done
+            done
+
+            if [ "$FOUND" = "0" ]; then
+              echo "ERROR: Could not find any artifact for batch ${BATCH}"
+              exit 1
+            fi
+          fi
+
+      # ── Download and extract page_cache ──────────────────────────────────
+      - name: Download page cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BATCH="${{ github.event.inputs.batch }}"
+          RUN_ID="${{ github.event.inputs.run_id }}"
+          ARTIFACT_NAME="batch-${BATCH}-cache"
+          mkdir -p page_cache_dl
+          FOUND=0
+
+          if [ -n "$RUN_ID" ]; then
+            # ── Specific run ID — pull cache from that run ──────────────────
+            echo "Downloading cache from run $RUN_ID"
+            if gh run download "$RUN_ID" --name "$ARTIFACT_NAME" --dir page_cache_dl/ 2>/dev/null; then
+              FOUND=1
+              echo "Cache downloaded from run $RUN_ID"
+            else
+              echo "WARNING: No cache artifact '$ARTIFACT_NAME' found in run $RUN_ID"
+            fi
+          else
+            # ── No run ID — search all runs for latest cache ─────────────
             PAGE=1
-            FOUND=0
             while true; do
               RESP=$(gh api \
                 "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100&page=${PAGE}" \
@@ -155,71 +247,20 @@ jobs:
 
               if [ -n "$ART_ID" ]; then
                 if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
-                     > input_xlsx/download.zip 2>/dev/null; then
-                  unzip -q input_xlsx/download.zip -d input_xlsx/ 2>/dev/null || true
-                  rm -f input_xlsx/download.zip
-                  XLSX=$(find input_xlsx -name "*.xlsx" | head -1)
-                  if [ -n "$XLSX" ]; then
-                    cp "$XLSX" input.xlsx
-                    echo "Downloaded: $XLSX (from $ARTIFACT_NAME)"
-                    FOUND=1
-                    break 2
-                  fi
+                     > page_cache_dl/download.zip 2>/dev/null; then
+                  unzip -q page_cache_dl/download.zip -d page_cache_dl/ 2>/dev/null || true
+                  rm -f page_cache_dl/download.zip
+                  FOUND=1
+                  break
                 fi
               fi
               [ "$COUNT" -lt 100 ] && break
               PAGE=$((PAGE + 1))
             done
-          done
 
-          if [ "$FOUND" = "0" ]; then
-            echo "ERROR: Could not find google-ratings-batch-${BATCH}, batch-${BATCH}-deduped, or batch-${BATCH} artifact"
-            exit 1
-          fi
-
-      # ── Download and extract page_cache ──────────────────────────────────
-      - name: Download page cache
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          BATCH="${{ github.event.inputs.batch }}"
-          ARTIFACT_NAME="batch-${BATCH}-cache"
-          mkdir -p page_cache_dl
-
-          PAGE=1
-          FOUND=0
-          while true; do
-            RESP=$(gh api \
-              "repos/$GITHUB_REPOSITORY/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100&page=${PAGE}" \
-              2>/dev/null || echo "")
-            [ -z "$RESP" ] && break
-            COUNT=$(echo "$RESP" | python3 -c \
-              "import sys,json; d=json.load(sys.stdin); print(len(d.get('artifacts',[])))" 2>/dev/null || echo "0")
-            [ "$COUNT" = "0" ] && break
-
-            ART_ID=$(echo "$RESP" | python3 -c "
-          import sys, json
-          d = json.load(sys.stdin)
-          arts = [a for a in d.get('artifacts',[]) if not a.get('expired', False)]
-          if arts:
-              print(arts[0]['id'])
-          " 2>/dev/null || echo "")
-
-            if [ -n "$ART_ID" ]; then
-              if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${ART_ID}/zip" \
-                   > page_cache_dl/download.zip 2>/dev/null; then
-                unzip -q page_cache_dl/download.zip -d page_cache_dl/ 2>/dev/null || true
-                rm -f page_cache_dl/download.zip
-                FOUND=1
-                break
-              fi
+            if [ "$FOUND" = "0" ]; then
+              echo "WARNING: No cache artifact found for batch ${BATCH}"
             fi
-            [ "$COUNT" -lt 100 ] && break
-            PAGE=$((PAGE + 1))
-          done
-
-          if [ "$FOUND" = "0" ]; then
-            echo "WARNING: No cache artifact found for batch ${BATCH}"
           fi
 
           # Handle tar.gz (from scraper.yml) or raw directory (legacy)
