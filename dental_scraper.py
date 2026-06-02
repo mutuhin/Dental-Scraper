@@ -1160,6 +1160,76 @@ def _extract_doctor_scoped_text(soup, name_core):
     return ""
 
 
+def _name_completeness_score(name: str) -> int:
+    """Score how complete a doctor name string is (higher = more complete)."""
+    score = len(name.split())
+    if re.match(r'Dr\.?\s+', name, re.I):
+        score += 4
+    if re.search(r'\s+[A-Z]\.\s+|\s+[A-Z]\.$', name):
+        score += 2  # middle initial present
+    if re.search(r',\s*(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD)', name, re.I):
+        score += 3
+    return score
+
+
+def _extract_fuller_name_from_bio(bio_soup, current_name: str, name_core: str) -> str:
+    """
+    Scan bio-page h1-h4 headings for a more complete version of the doctor's
+    name (adds Dr. prefix, middle initial, or credential suffix).
+    Returns the richer form, or current_name unchanged if nothing better found.
+    """
+    # Core words to match against (e.g. ["stephen", "palmer"])
+    core_words = [w for w in name_core.split() if len(w) > 2]
+    if not core_words:
+        return current_name
+
+    best = current_name
+    best_score = _name_completeness_score(current_name)
+
+    for heading in bio_soup.find_all(["h1", "h2", "h3", "h4"]):
+        heading_text = heading.get_text(separator=" ", strip=True)
+        heading_ascii = _ascii_normalize(heading_text)
+        heading_lower = heading_ascii.lower()
+
+        # Heading must contain all core name words
+        if not all(w in heading_lower for w in core_words):
+            continue
+
+        # Try structured extraction via doctor patterns
+        for pattern in _DOCTOR_PATTERNS:
+            m = re.search(pattern, heading_ascii)
+            if not m:
+                continue
+            candidate = re.sub(r"\s+", " ", m.group(0).strip())
+            _after = heading_ascii[m.end():]
+            _ext = _CRED_TAIL_RE.match(_after)
+            if _ext:
+                candidate = re.sub(r"\s+", " ", (candidate + _ext.group(0)).strip())
+            if re.search(r'\d', candidate):
+                continue
+            if not _is_valid_doctor_name(candidate):
+                continue
+            score = _name_completeness_score(candidate)
+            if score > best_score:
+                cand_lower = _ascii_normalize(candidate).lower()
+                if all(w in cand_lower for w in core_words):
+                    best = candidate
+                    best_score = score
+            break
+
+        # Fallback: use the raw heading text when it's a short clean name
+        # (catches "Stephen M. Palmer" — adds middle initial but has no Dr./DDS)
+        words = heading_text.split()
+        if 2 <= len(words) <= 6 and not re.search(r'\d', heading_text):
+            if _is_valid_doctor_name(_ascii_normalize(heading_text)):
+                score = _name_completeness_score(heading_text)
+                if score > best_score:
+                    best = heading_text
+                    best_score = score
+
+    return best
+
+
 def _parse_team_page_for_doctors(soup):
     """
     Parse a team/doctor page to find individual doctor sections.
@@ -1634,7 +1704,13 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             # Parse the fetched page and scope to this doctor's section to avoid
             # contamination from site-wide navigation/banner keywords.
             _static_bio_thin = False   # track whether static fetch was empty (for PW fallback)
-            if bio_url and base_url and (not _specialty or not _assoc):
+            # Also fetch bio page when name lacks Dr. prefix AND credentials
+            # (name upgrade; cost is one extra GET when specialty is already known)
+            _name_incomplete = (
+                not re.match(r'Dr\.?\s+', sec["name"], re.I)
+                and not re.search(r',\s*(?:DDS|DMD|MD)', sec["name"], re.I)
+            )
+            if bio_url and base_url and (not _specialty or not _assoc or _name_incomplete):
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
                     try:
@@ -1643,6 +1719,11 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         bio_r = safe_get(full_bio)
                         if bio_r and len(bio_r.text) > 500:
                             _bio_soup = BeautifulSoup(bio_r.text, "lxml")
+                            # Upgrade name from bio page heading if fuller form exists
+                            _fuller = _extract_fuller_name_from_bio(_bio_soup, sec["name"], _name_core)
+                            if _fuller != sec["name"]:
+                                log.info(f"   Name upgraded: {sec['name']!r} → {_fuller!r}")
+                                sec["name"] = _fuller
                             # Try scoped extraction first; fall back to main content
                             _scoped = _extract_doctor_scoped_text(_bio_soup, _name_core)
                             if len(_scoped) > 80:
@@ -1683,6 +1764,11 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         _pw_bio_html = pw_page.content()
                         if len(_pw_bio_html) > 500:
                             _pw_bio_soup = BeautifulSoup(_pw_bio_html, "lxml")
+                            # Upgrade name from PW-rendered bio page heading
+                            _fuller_pw = _extract_fuller_name_from_bio(_pw_bio_soup, sec["name"], _name_core)
+                            if _fuller_pw != sec["name"]:
+                                log.info(f"   Name upgraded (PW): {sec['name']!r} → {_fuller_pw!r}")
+                                sec["name"] = _fuller_pw
                             _scoped_pw = _extract_doctor_scoped_text(_pw_bio_soup, _name_core)
                             if len(_scoped_pw) > 80:
                                 bio_text = (bio_text + " " + _scoped_pw).strip().lower()
