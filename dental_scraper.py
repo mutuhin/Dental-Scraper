@@ -1373,6 +1373,82 @@ def _parse_team_page_for_doctors(soup):
             doctors.append({"name": name, "text": bio_text, "bio_url": bio_url})
             break
 
+    # ── Secondary pass: plain-name doctors in dental-role containers ──────────
+    # Catches names like "Colton Crane" that appear in team cards with a
+    # separate role line ("DDS", "General Dentist") — no Dr. prefix or DDS
+    # in the heading itself, so _DOCTOR_PATTERNS misses them entirely.
+    _SEC_ROLE_RE = re.compile(
+        r'\b(?:DDS|DMD|Doctor\s+of\s+Dental|General\s+Dentist|Family\s+Dentist|'
+        r'Cosmetic\s+Dentist|Pediatric\s+Dentist|Children\'?s\s+Dentist|'
+        r'Orthodontist|Periodontist|Endodontist|Prosthodontist|'
+        r'Oral\s+Surgeon|Dental\s+Specialist|Dental\s+Director|'
+        r'Lead\s+Dentist|Associate\s+Dentist|Attending\s+Dentist|'
+        r'Doctor\s+of\s+Dental\s+Surgery|Doctor\s+of\s+Dental\s+Medicine)\b',
+        re.I,
+    )
+    _PLAIN_NAME_RE2 = re.compile(
+        r'^[A-Z][a-z]+(?:-[A-Z][a-z]+)?'         # first name
+        r'(?:\s+[A-Z]\.?)?'                        # optional middle initial
+        r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?){1,3}$'  # 1-3 last name parts
+    )
+    _ROLE_WORDS2 = frozenset({
+        "dentist", "doctor", "hygienist", "orthodontist", "periodontist",
+        "endodontist", "prosthodontist", "surgeon", "specialist", "director",
+        "coordinator", "assistant", "manager", "administrator", "receptionist",
+        "general", "family", "cosmetic", "pediatric", "associate", "lead",
+        "attending", "chief", "founder", "owner", "principal", "dental",
+        "oral", "biological", "holistic",
+    })
+    for tag in soup.find_all(["div", "article", "li", "section"]):
+        cls_str = " ".join(tag.get("class", []))
+        if not re.search(
+            r'\b(team|doctor|provider|dentist|staff|bio|card|person|profile|member|meet)\b',
+            cls_str, re.I,
+        ):
+            continue
+        raw = tag.get_text(" ", strip=True)
+        if not (20 < len(raw) < 1200):
+            continue
+        # Require role text in a SHORT sub-element (title line, not bio prose)
+        _role_short = False
+        for rtag in tag.find_all(["p", "span", "div", "h4", "h5", "small", "em", "strong"]):
+            rtext = rtag.get_text(strip=True)
+            if len(rtext) <= 70 and _SEC_ROLE_RE.search(rtext):
+                _role_short = True
+                break
+        if not _role_short:
+            continue
+        for htag in tag.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b", "p", "span"]):
+            htext = htag.get_text(separator=" ", strip=True)
+            if len(htext) < 4 or len(htext) > 60:
+                continue
+            htext_ascii = _ascii_normalize(htext)
+            if htext_ascii.lower() in seen_names:
+                continue
+            if any(re.search(p, htext_ascii) for p in _DOCTOR_PATTERNS):
+                continue  # already captured by main loop
+            if re.search(r'\d', htext_ascii):
+                continue
+            if not _PLAIN_NAME_RE2.match(htext_ascii):
+                continue
+            words_lower = [w.strip('.,') for w in htext_ascii.lower().split()]
+            if any(w in _ROLE_WORDS2 for w in words_lower):
+                continue
+            if any(w in htext_ascii.lower() for w in _SKIP_WORDS):
+                continue
+            if not _is_valid_doctor_name(htext_ascii):
+                continue
+            seen_names.add(htext_ascii.lower())
+            bio_text = raw.lower()
+            bio_url = ""
+            for a in tag.find_all("a", href=True):
+                href = a.get("href", "")
+                if href and not href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                    bio_url = href
+                    break
+            doctors.append({"name": htext_ascii, "text": bio_text, "bio_url": bio_url})
+            break
+
     # Deduplicate using normalised name matching
     # Sort by word count descending so the most complete name is kept first
     doctors.sort(key=lambda d: len(d["name"].split()), reverse=True)
@@ -1933,6 +2009,18 @@ def find_associations(text):
         # Holistic / biological
         "IABDM": "International Academy of Biological Dentistry and Medicine",
         "IAOMT": "International Academy of Oral Medicine and Toxicology",
+        # Additional orgs seen in manual data review
+        "AARD":  "American Academy of Restorative Dentistry",
+        "ACD":   "American College of Dentists",
+        "ICD":   "International College of Dentists",
+        "HDA":   "Hispanic Dental Association",
+        "WCLI":  "World Clinical Laser Institute",
+        "IALD":  "International Academy of Laser Dentistry",
+        "IDIA":  "International Dental Implant Association",
+        "ODA":   "Ohio Dental Association",
+        "TDS":   "Tennessee Dental Society",
+        "AAFE":  "American Academy of Facial Esthetics",
+        "NDA":   "National Dental Association",
     }
     text_upper = text.upper()
     found = []
@@ -1940,6 +2028,34 @@ def find_associations(text):
         # Match abbreviation as a whole word (avoid ADA matching "AAID", etc.)
         if re.search(rf'\b{re.escape(abbr)}\b', text_upper) or full.upper() in text_upper:
             found.append(abbr)
+
+    # Educational / university affiliations — only when edu-context words are present
+    # (prevents false positives from "OSU" or "UCLA" in non-educational text)
+    _EDU_ABBREVS = {
+        "OSU":   "Ohio State University",
+        "CWRU":  "Case Western Reserve University",
+        "NYU":   "NYU College of Dentistry",
+        "UCLA":  "UCLA School of Dentistry",
+        "USC":   "USC School of Dentistry",
+        "MSU":   "Michigan State University",
+        "UTHSC": "University of Tennessee Health Science Center",
+        "USAF":  "US Air Force",
+    }
+    _EDU_CTX_RE = re.compile(
+        r'\b(?:graduated?|degree|trained|studied|completed|attended|'
+        r'alumni|alumnus|alumna|received\s+(?:his|her|their)?\s*(?:degree|training)|'
+        r'school\s+of\s+dent|college\s+of\s+dent|dental\s+school|'
+        r'dental\s+medicine|dental\s+surgery)\b',
+        re.I,
+    )
+    if _EDU_CTX_RE.search(text):
+        for abbr, full in _EDU_ABBREVS.items():
+            if abbr not in found and (
+                re.search(rf'\b{re.escape(abbr)}\b', text_upper)
+                or full.upper() in text_upper
+            ):
+                found.append(abbr)
+
     return ", ".join(found) if found else ""
 
 
