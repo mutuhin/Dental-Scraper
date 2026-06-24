@@ -1230,6 +1230,40 @@ def _extract_fuller_name_from_bio(bio_soup, current_name: str, name_core: str) -
     return best
 
 
+def _extract_specialty_hint_from_bio(bio_soup, name_core: str) -> str:
+    """
+    Find the short specialty/role subtitle on an individual bio page.
+    Looks for the first short element (≤90 chars, contains dental keyword)
+    that immediately follows the heading containing the doctor's name.
+    Returns the subtitle text, or "" if none found.
+    """
+    _HINT_RE = re.compile(
+        r'\b(?:dentistry|dentist|dds|dmd|orthodon|periodon|endodon|'
+        r'prosthodon|oral\s+surg|hygien|implant|cosmetic|pediatric|'
+        r'restorat|preventi|specialist|surgeon)\b',
+        re.I,
+    )
+    core_words = [w for w in name_core.split() if len(w) > 2]
+    if not core_words:
+        return ""
+
+    for heading in bio_soup.find_all(["h1", "h2", "h3", "h4"]):
+        h_lower = heading.get_text(separator=" ", strip=True).lower()
+        if not all(w in h_lower for w in core_words):
+            continue
+        for sib in heading.next_siblings:
+            if not hasattr(sib, 'get_text'):
+                continue
+            sib_text = sib.get_text(separator=" ", strip=True)
+            if not sib_text or len(sib_text) < 5:
+                continue
+            if len(sib_text) <= 90 and _HINT_RE.search(sib_text):
+                return sib_text
+            if len(sib_text) > 200:
+                break
+    return ""
+
+
 def _parse_team_page_for_doctors(soup):
     """
     Parse a team/doctor page to find individual doctor sections.
@@ -1239,6 +1273,15 @@ def _parse_team_page_for_doctors(soup):
     """
     doctors = []
     seen_names = set()
+
+    # Matches a short subtitle element that describes a doctor's specialty/role.
+    # Used to extract specialty_hint from team-card subtitle lines.
+    _SPEC_HINT_RE = re.compile(
+        r'\b(?:dentistry|dentist|dds|dmd|orthodon|periodon|endodon|'
+        r'prosthodon|oral\s+surg|hygien|implant|cosmetic|pediatric|'
+        r'restorat|preventi|specialist|surgeon)\b',
+        re.I,
+    )
 
     for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5"]):
         heading_text = heading.get_text(separator=" ", strip=True)
@@ -1370,7 +1413,21 @@ def _parse_team_page_for_doctors(soup):
 
                 bio_text = candidate.lower()
 
-            doctors.append({"name": name, "text": bio_text, "bio_url": bio_url})
+            # ── Specialty hint: short subtitle line immediately after heading ──
+            _spec_hint = ""
+            for _sh_sib in heading.next_siblings:
+                if not hasattr(_sh_sib, 'get_text'):
+                    continue
+                _sh_text = _sh_sib.get_text(separator=" ", strip=True)
+                if not _sh_text or len(_sh_text) < 5:
+                    continue
+                if len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text):
+                    _spec_hint = _sh_text
+                    break
+                if len(_sh_text) > 200:
+                    break
+            doctors.append({"name": name, "text": bio_text, "bio_url": bio_url,
+                            "specialty_hint": _spec_hint})
             break
 
     # ── Secondary pass: plain-name doctors in dental-role containers ──────────
@@ -1446,7 +1503,21 @@ def _parse_team_page_for_doctors(soup):
                 if href and not href.startswith(("#", "mailto:", "tel:", "javascript:")):
                     bio_url = href
                     break
-            doctors.append({"name": htext_ascii, "text": bio_text, "bio_url": bio_url})
+            # Specialty hint from subtitle sibling of the matched heading
+            _spec_hint_sec = ""
+            for _sh_sib in htag.next_siblings:
+                if not hasattr(_sh_sib, 'get_text'):
+                    continue
+                _sh_text = _sh_sib.get_text(separator=" ", strip=True)
+                if not _sh_text or len(_sh_text) < 5:
+                    continue
+                if len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text):
+                    _spec_hint_sec = _sh_text
+                    break
+                if len(_sh_text) > 200:
+                    break
+            doctors.append({"name": htext_ascii, "text": bio_text, "bio_url": bio_url,
+                            "specialty_hint": _spec_hint_sec})
             break
 
     # Deduplicate using normalised name matching
@@ -1800,6 +1871,11 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                             if _fuller != sec["name"]:
                                 log.info(f"   Name upgraded: {sec['name']!r} → {_fuller!r}")
                                 sec["name"] = _fuller
+                            # Extract specialty subtitle from bio page heading area
+                            if not sec.get("specialty_hint"):
+                                _bio_hint = _extract_specialty_hint_from_bio(_bio_soup, _name_core)
+                                if _bio_hint:
+                                    sec["specialty_hint"] = _bio_hint
                             # Try scoped extraction first; fall back to main content
                             _scoped = _extract_doctor_scoped_text(_bio_soup, _name_core)
                             if len(_scoped) > 80:
@@ -1845,6 +1921,10 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                             if _fuller_pw != sec["name"]:
                                 log.info(f"   Name upgraded (PW): {sec['name']!r} → {_fuller_pw!r}")
                                 sec["name"] = _fuller_pw
+                            if not sec.get("specialty_hint"):
+                                _bio_hint_pw = _extract_specialty_hint_from_bio(_pw_bio_soup, _name_core)
+                                if _bio_hint_pw:
+                                    sec["specialty_hint"] = _bio_hint_pw
                             _scoped_pw = _extract_doctor_scoped_text(_pw_bio_soup, _name_core)
                             if len(_scoped_pw) > 80:
                                 bio_text = (bio_text + " " + _scoped_pw).strip().lower()
@@ -1874,6 +1954,20 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         break
 
             # Step 4 — output per-doctor result.
+            # Apply specialty_hint from card subtitle as fallback when all
+            # bio-based extraction failed to find a meaningful phrase.
+            _spec_hint_val = sec.get("specialty_hint", "")
+            if _spec_hint_val and not re.match(
+                r'^(?:dds|dmd|md|doctor)\s*$', _spec_hint_val, re.I
+            ):
+                if not _specialty or _specialty == "Not Found":
+                    _specialty = _spec_hint_val
+                elif _specialty in (
+                    "General", "Family", "Cosmetic", "Restorative",
+                    "Implants", "Pediatric", "Laser", "Sedation",
+                ) and len(_spec_hint_val) > len(_specialty):
+                    _specialty = _spec_hint_val
+
             # Blank if multi-doctor site and we found nothing specific to this doctor.
             if _multi_doctor and not _specialty and not _assoc and len(bio_text) < 50:
                 doctors.append({
@@ -2021,6 +2115,22 @@ def find_associations(text):
         "TDS":   "Tennessee Dental Society",
         "AAFE":  "American Academy of Facial Esthetics",
         "NDA":   "National Dental Association",
+        # State dental associations
+        "LDA":   "Louisiana Dental Association",
+        "MDA":   "Minnesota Dental Association",
+        "TDA":   "Texas Dental Association",
+        "CDA":   "California Dental Association",
+        "GDA":   "Georgia Dental Association",
+        "VDA":   "Virginia Dental Association",
+        "WDA":   "Wisconsin Dental Association",
+        "NCDA":  "North Carolina Dental Association",
+        "SCDA":  "South Carolina Dental Association",
+        "NJDA":  "New Jersey Dental Association",
+        "ADDA":  "American Dental Directors Association",
+        # Study clubs and continuing-education networks
+        "CMDA":  "Christian Medical and Dental Associations",
+        "SSC":   "Spear Study Club",
+        "TNI":   "The Nashville Institute",
     }
     text_upper = text.upper()
     found = []
@@ -2055,6 +2165,31 @@ def find_associations(text):
                 or full.upper() in text_upper
             ):
                 found.append(abbr)
+
+    # ── Membership section scanner ───────────────────────────────────────────
+    # Scan for explicit "Memberships:" / "Member of:" sections and extract
+    # ALL-CAPS abbreviations from them — catches org abbreviations not in the
+    # map (state associations, study clubs, regional societies, etc.)
+    _MEMB_SECT_RE = re.compile(
+        r'(?:professional\s+)?(?:member(?:ship)?s?(?:\s+of)?|'
+        r'association(?:s)?|affiliation(?:s)?)\s*[:\-–]\s*([^\n]{5,400})',
+        re.I,
+    )
+    _SKIP_SECT_ABBREVS = frozenset({
+        "THE", "AND", "FOR", "DDS", "DMD", "MD", "OR", "OF", "IN", "AT",
+        "TO", "BY", "AN", "IS", "BE", "ON", "AS", "IF", "NO", "NOT",
+        "ARE", "HAS", "WAS", "HAD", "DO", "DID", "US", "IT", "ALL",
+        "NEW", "ALSO", "BOTH", "EACH", "FROM", "WITH", "THAT", "THIS",
+        "II", "III", "IV", "VI", "VII", "VIII", "IX", "XI", "XII",
+    })
+    for _ms in _MEMB_SECT_RE.finditer(text):
+        _mtext = _ms.group(1)
+        for _m in re.finditer(r'\b([A-Z]{2,6})\b', _mtext):
+            _mabbr = _m.group(1)
+            if _mabbr in _SKIP_SECT_ABBREVS:
+                continue
+            if _mabbr not in found:
+                found.append(_mabbr)
 
     return ", ".join(found) if found else ""
 
