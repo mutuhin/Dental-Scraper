@@ -41,7 +41,7 @@ import sys
 import time
 import re
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -325,12 +325,174 @@ def load_blocked_from_batch(path):
     return rows
 
 
+# ── Supplementary doctor extraction for network / FQHC sites ─────────────────
+# Some websites (e.g. clinicas.org) list all dental providers on a separate
+# sub-page with doctor names in <a> tags instead of headings.  The main
+# dental_scraper pipeline misses these.  After the main scrape, if no doctors
+# were found, this supplementary crawl finds and fetches dental sub-pages and
+# extracts names using a direct regex scan on the full page text.
+
+def _find_dental_subpage_urls(html, base_url):
+    """
+    Find URLs of dental / provider sub-pages linked from the given page HTML.
+    Returns up to 5 absolute URLs on the same domain.
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    base_netloc = urlparse(base_url).netloc
+    found = []
+    seen  = set()
+    _DENTAL_LINK_RE = re.compile(
+        r'\b(dental|dentist|dentistry|provider|our\s+team|meet\s+the\s+team|'
+        r'our\s+staff|our\s+doctors|physicians|specialists)\b', re.I,
+    )
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        text = a.get_text(strip=True)
+        if not (_DENTAL_LINK_RE.search(href) or _DENTAL_LINK_RE.search(text)):
+            continue
+        full = urljoin(base_url, href).split("?")[0].rstrip("/")
+        if urlparse(full).netloc != base_netloc:
+            continue
+        if full in seen or full == base_url.rstrip("/"):
+            continue
+        seen.add(full)
+        found.append(full)
+        if len(found) >= 5:
+            break
+    return found
+
+
+_ROLE_WORDS_EXT = frozenset({
+    "dentist", "doctor", "hygienist", "orthodontist", "periodontist",
+    "endodontist", "prosthodontist", "surgeon", "specialist", "director",
+    "coordinator", "assistant", "manager", "receptionist", "founder",
+    "owner", "provider", "physician", "associate", "general", "pediatric",
+    "cosmetic", "family", "lead", "attending", "chief", "principal",
+})
+
+
+def _extract_doctors_from_html(html):
+    """
+    Scan page HTML for doctor names matching _DOCTOR_PATTERNS.
+    Extends leftward to recover first names that precede the regex match
+    (e.g. "Ayesha" before "Raza Waseer, DDS").
+    Returns list of {"name", "specialty", "associations"}.
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    for t in soup.find_all(["nav", "header", "footer", "script", "style"]):
+        t.decompose()
+    text = soup.get_text(separator=" ", strip=True)
+
+    seen    = set()
+    doctors = []
+    for pat in ds._DOCTOR_PATTERNS:
+        for m in re.finditer(pat, text):
+            raw_name = re.sub(r"\s+", " ", m.group(0).strip())
+            # Extend leftward to recover additional first-name words that were
+            # not captured by the pattern (e.g. 3-word names like "Ayesha Raza Waseer")
+            start = m.start()
+            prefix = text[max(0, start - 45):start].strip()
+            if prefix:
+                extra = []
+                for w in reversed(prefix.split()):
+                    # Only plain capitalized words that are not role titles
+                    if re.match(r'^[A-Z][a-z]{1,20}$', w) and w.lower() not in _ROLE_WORDS_EXT:
+                        extra.insert(0, w)
+                    else:
+                        break   # stop at any non-name word
+                if extra:
+                    raw_name = " ".join(extra) + " " + raw_name
+                    raw_name = re.sub(r"\s+", " ", raw_name.strip())
+            key = raw_name.lower()
+            if key in seen:
+                continue
+            if re.search(r"\d", raw_name) or len(raw_name) < 5 or len(raw_name) > 70:
+                continue
+            if any(w in raw_name.lower() for w in ds._SKIP_WORDS):
+                continue
+            if not ds._is_valid_doctor_name(raw_name):
+                continue
+            seen.add(key)
+            spec  = ds.find_specialty(text[:8000])
+            assoc = ds.find_associations(text[:8000])
+            doctors.append({
+                "name":         raw_name,
+                "specialty":    spec  or "Not Found",
+                "associations": assoc or "Not Found",
+            })
+    return doctors
+
+
+def _fetch_html_bypass(url):
+    """Fetch a URL with bypass strategies, return HTML text or None."""
+    # Try curl_cffi first (fast, no subprocess)
+    if _CFFI_OK:
+        for profile in random.sample(_CFFI_PROFILES[:4], 4):
+            try:
+                sess = cffi_requests.Session(impersonate=profile)
+                r = sess.get(url, timeout=15, verify=False, allow_redirects=True)
+                if r.status_code == 200 and not _is_challenge_html(r):
+                    return r.text
+                break
+            except Exception:
+                continue
+    # Fall back to Playwright stealth
+    return _pw_get_html(url)
+
+
+def _supplement_doctors(result, website):
+    """
+    When the main scrape found no doctors, fetch dental sub-pages and extract
+    doctor names via full-text regex.  Updates result in-place.
+    """
+    existing_doctors = result.get("doctors") or []
+    if any(d.get("name") and d["name"] not in ("Not Found", "") for d in existing_doctors):
+        return   # already have doctors
+
+    print(f"  → No doctors found — trying supplementary dental sub-page crawl…")
+    main_html = _fetch_html_bypass(website)
+    if not main_html:
+        print("  → Could not fetch main page for sub-page discovery")
+        return
+
+    sub_urls = _find_dental_subpage_urls(main_html, website)
+    if not sub_urls:
+        print("  → No dental sub-pages found in navigation")
+        return
+
+    print(f"  → Dental sub-pages: {sub_urls}")
+    found_doctors = []
+    for url in sub_urls:
+        print(f"     Fetching: {url}")
+        html = _fetch_html_bypass(url)
+        if not html:
+            continue
+        drs = _extract_doctors_from_html(html)
+        for d in drs:
+            if not any(e["name"] == d["name"] for e in found_doctors):
+                found_doctors.append(d)
+        if found_doctors:
+            print(f"     Found {len(drs)} doctor(s): {', '.join(x['name'] for x in drs)}")
+
+    if found_doctors:
+        result["doctors"] = found_doctors
+        result["scraped_doctor_names"] = ", ".join(d["name"] for d in found_doctors)
+        print(f"  → Supplementary doctors captured: {result['scraped_doctor_names']}")
+    else:
+        print(f"  → Supplementary crawl: still no doctors found")
+
+
 # ── Scrape one practice with all bypass strategies ────────────────────────────
 
 def scrape_with_bypass(row, pw_page=None):
     """
     Monkey-patch ds.safe_get, run the full scraper pipeline, restore original.
-    Playwright page uses stealth JS already applied at context level.
+    After the main pipeline, runs supplementary dental sub-page crawl when no
+    doctors were found (handles network/FQHC sites like clinicas.org).
     """
     global _orig_safe_get
     _orig_safe_get = ds.safe_get
@@ -339,6 +501,13 @@ def scrape_with_bypass(row, pw_page=None):
         result = ds.scrape_practice(row, pw_page=pw_page)
     finally:
         ds.safe_get = _orig_safe_get
+
+    # Supplementary pass: for network/FQHC sites where doctors are on a
+    # separate dental-services page (not the main location/homepage)
+    website = row.get("Website", "")
+    if website and isinstance(result, dict):
+        _supplement_doctors(result, website)
+
     return result
 
 
