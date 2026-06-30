@@ -251,27 +251,49 @@ def _make_pw_context(pw, proxy_url=None):
     return ctx
 
 
-def _pw_get_html(url, proxy_url=None):
-    """Fetch a URL using Playwright with stealth. Returns HTML string or None."""
+def _pw_get_html(url, proxy_url=None, pw_context=None):
+    """
+    Fetch a URL using Playwright with stealth. Returns HTML string or None.
+    If pw_context (an already-open browser context) is given, reuse it via a
+    new tab instead of spinning up a second sync_playwright() instance —
+    Playwright's sync API does not support nested instances on the same
+    thread and raises if you try.
+    """
     if not _PW_OK:
         return None
+
+    def _load(page):
+        page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+        page.goto(url, timeout=25000, wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
+        # Wait for Cloudflare JS challenge to auto-resolve
+        for _ in range(3):
+            title = page.title().lower()
+            if "just a moment" in title or "checking your" in title:
+                page.wait_for_timeout(5000)
+            else:
+                break
+        html = page.content()
+        return html if len(html) > 2000 else None
+
+    if pw_context is not None:
+        try:
+            page = pw_context.new_page()
+            try:
+                return _load(page)
+            finally:
+                page.close()
+        except Exception as e:
+            ds.log.warning(f"   [bypass] Playwright failed for {url}: {e}")
+            return None
+
     try:
         with sync_playwright() as pw:
             ctx  = _make_pw_context(pw, proxy_url)
             page = ctx.new_page()
-            page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-            page.goto(url, timeout=25000, wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
-            # Wait for Cloudflare JS challenge to auto-resolve
-            for _ in range(3):
-                title = page.title().lower()
-                if "just a moment" in title or "checking your" in title:
-                    page.wait_for_timeout(5000)
-                else:
-                    break
-            html = page.content()
+            html = _load(page)
             ctx.close()
-            return html if len(html) > 2000 else None
+            return html
     except Exception as e:
         ds.log.warning(f"   [bypass] Playwright failed for {url}: {e}")
         return None
@@ -427,7 +449,7 @@ def _extract_doctors_from_html(html):
     return doctors
 
 
-def _fetch_html_bypass(url):
+def _fetch_html_bypass(url, pw_context=None):
     """Fetch a URL with bypass strategies, return HTML text or None."""
     # Try curl_cffi first (fast, no subprocess)
     if _CFFI_OK:
@@ -441,10 +463,10 @@ def _fetch_html_bypass(url):
             except Exception:
                 continue
     # Fall back to Playwright stealth
-    return _pw_get_html(url)
+    return _pw_get_html(url, pw_context=pw_context)
 
 
-def _supplement_doctors(result, website):
+def _supplement_doctors(result, website, pw_context=None):
     """
     When the main scrape found no doctors, fetch dental sub-pages and extract
     doctor names via full-text regex.  Updates result in-place.
@@ -454,7 +476,7 @@ def _supplement_doctors(result, website):
         return   # already have doctors
 
     print(f"  → No doctors found — trying supplementary dental sub-page crawl…")
-    main_html = _fetch_html_bypass(website)
+    main_html = _fetch_html_bypass(website, pw_context=pw_context)
     if not main_html:
         print("  → Could not fetch main page for sub-page discovery")
         return
@@ -468,7 +490,7 @@ def _supplement_doctors(result, website):
     found_doctors = []
     for url in sub_urls:
         print(f"     Fetching: {url}")
-        html = _fetch_html_bypass(url)
+        html = _fetch_html_bypass(url, pw_context=pw_context)
         if not html:
             continue
         drs = _extract_doctors_from_html(html)
@@ -506,7 +528,8 @@ def scrape_with_bypass(row, pw_page=None):
     # separate dental-services page (not the main location/homepage)
     website = row.get("Website", "")
     if website and isinstance(result, dict):
-        _supplement_doctors(result, website)
+        pw_context = pw_page.context if pw_page is not None else None
+        _supplement_doctors(result, website, pw_context=pw_context)
 
     return result
 
