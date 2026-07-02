@@ -168,6 +168,19 @@ _SOCIAL_UA_LIST = [
 _CFFI_PROFILES  = ["chrome136", "chrome124", "chrome133a", "chrome110", "safari260", "safari17_2"]
 _CFFI_IG_PROF   = ["chrome124", "chrome136", "safari260"]
 
+# Social-platform throttle — minimum seconds between consecutive FB/IG/TikTok requests.
+# FB/IG block IPs that hit them faster than ~1 req/5s; 4-8s is safe for 100-row batches.
+_SOCIAL_MIN_DELAY = 4.0
+_last_social_hit: list = [0.0]   # mutable singleton so all functions share state
+
+def _social_sleep():
+    """Enforce minimum gap between social platform requests."""
+    elapsed = time.time() - _last_social_hit[0]
+    wait = _SOCIAL_MIN_DELAY + random.uniform(0, 3) - elapsed
+    if wait > 0:
+        time.sleep(wait)
+    _last_social_hit[0] = time.time()
+
 SERVICE_KEYWORDS = {
     # ── Invisalign ────────────────────────────────────────────────────────────
     "invisalign":            "Invisalign",
@@ -2552,44 +2565,78 @@ def yelp_search_rating(practice_name, city, state):
 # PLAYWRIGHT — Facebook
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_fb_followers(html_or_text: str) -> str:
+    """Extract follower/like count from raw Facebook HTML or plain text.
+    Searches the raw content (including script tags) because Facebook
+    embeds counts in JS strings, not in the visible DOM."""
+    m = re.search(r"([\d,]+(?:\.\d+)?[KMB]?)\s*(?:people\s+)?follow(?:ers?)?", html_or_text, re.I)
+    if m:
+        return m.group(1).replace(",", "")
+    m = re.search(r"([\d,]+(?:\.\d+)?[KMB]?)\s*(?:people\s+)?like(?:\s+this)?", html_or_text, re.I)
+    if m:
+        return m.group(1).replace(",", "")
+    return ""
+
+
+def _fb_cffi_get(url: str) -> str:
+    """
+    Fetch a facebook.com page via curl_cffi (desktop Chrome impersonation) + proxy.
+    Returns raw HTML or "" on failure.
+    """
+    if not _CFFI_AVAILABLE:
+        return ""
+    _px = {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY} if _BYPASS_PROXY else None
+    _headers = {
+        "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "sec-fetch-site":  "none",
+        "sec-fetch-mode":  "navigate",
+        "sec-fetch-dest":  "document",
+    }
+    for _profile in ["chrome136", "chrome124", "safari260"]:
+        try:
+            sess = cffi_requests.Session(impersonate=_profile)
+            r = sess.get(url, headers=_headers, proxies=_px, timeout=20, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 1000:
+                return r.text
+        except Exception as _e:
+            log.debug(f"   FB curl_cffi error ({_profile}): {_e}")
+    return ""
+
+
 def get_facebook_stats_pw(url, page):
     """
-    Navigate to a Facebook Page and extract follower count + visible post count.
+    Fetch Facebook follower count.
+    Strategy 1: curl_cffi desktop Chrome + proxy on www.facebook.com (fastest, no login wall).
+    Strategy 2: Playwright fallback.
     Returns (posts_str, followers_str).
     """
     if not url or not page:
         return "Not Found", "Not Found"
+
+    _social_sleep()
+
+    # ── Strategy 1: curl_cffi + proxy (works for most public pages) ─────────────
+    html = _fb_cffi_get(url)
+    if html:
+        followers = _parse_fb_followers(html)   # search raw HTML — counts live in <script>
+        if followers:
+            log.info(f"   FB curl_cffi hit → {followers} followers")
+            return "See Page", followers
+
+    # ── Strategy 2: Playwright on www.facebook.com ──────────────────────────────
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(2000 if IS_CI else 4000)
-
-        content = page.content()
-        text = extract_text(content)
-
-        # Follower / like count — "X followers" or "X people follow this"
-        follower_match = re.search(
-            r"([\d,]+(?:\.\d+)?[KMB]?)\s*(?:people\s+)?follow(?:ers?)?",
-            text, re.IGNORECASE
-        )
-        like_match = re.search(
-            r"([\d,]+(?:\.\d+)?[KMB]?)\s*(?:people\s+)?like",
-            text, re.IGNORECASE
-        )
-        followers = "Not Found"
-        if follower_match:
-            followers = follower_match.group(1).replace(",", "")
-        elif like_match:
-            followers = like_match.group(1).replace(",", "")
-
-        # Post count — count visible post/article elements
+        raw_content = page.content()
+        followers = _parse_fb_followers(raw_content) or "Blocked"   # raw HTML, not extract_text
         try:
             post_count = page.locator('[role="article"]').count()
             posts = str(post_count) if post_count > 0 else "See Page"
         except Exception:
             posts = "See Page"
-
         return posts, followers
-
     except PlaywrightTimeout:
         log.warning(f"  Facebook timeout: {url}")
         return "Blocked", "Blocked"
@@ -2599,17 +2646,21 @@ def get_facebook_stats_pw(url, page):
 
 
 def get_facebook_stats_requests(url):
-    """Fallback requests-based Facebook scrape."""
+    """Fallback requests-based Facebook scrape using curl_cffi + proxy."""
     if not url:
         return "Not Found", "Not Found"
-    time.sleep(DELAY_SEC)
+    _social_sleep()
+    html = _fb_cffi_get(url)
+    if html:
+        followers = _parse_fb_followers(html)   # raw HTML
+        if followers:
+            return "See Page", followers
+    # Plain requests last resort
     r = safe_get(url)
     if not r:
         return "Blocked", "Blocked"
-    text = extract_text(r.text)
-    m = re.search(r"([\d,]+)\s*(?:people\s*)?(?:like|follow)", text)
-    followers = m.group(1).replace(",", "") if m else "Blocked"
-    return "Login Required", followers
+    followers = _parse_fb_followers(r.text) or "Blocked"   # raw HTML
+    return "See Page", followers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2623,6 +2674,7 @@ def get_instagram_stats_pw(url, page):
     """
     if not url or not page:
         return "Not Found", "Not Found"
+    _social_sleep()
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(2000 if IS_CI else 4000)
@@ -2665,7 +2717,7 @@ def get_instagram_stats_requests(url):
     """Fallback requests-based Instagram scrape."""
     if not url:
         return "Not Found", "Not Found"
-    time.sleep(DELAY_SEC)
+    _social_sleep()
     r = safe_get(url)
     if not r:
         return "Blocked", "Blocked"
@@ -2679,8 +2731,8 @@ def get_instagram_stats_requests(url):
 
 def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
     """
-    Fetch Instagram posts + followers via the internal web API (no login needed
-    for public profiles).  Uses curl_cffi TLS impersonation.
+    Fetch Instagram posts + followers via the internal web API.
+    Uses curl_cffi TLS impersonation + Oxylabs proxy to avoid IP rate-limits.
     Returns (posts, followers) or ("", "") on failure.
     """
     if not ig_url or not _CFFI_AVAILABLE:
@@ -2693,30 +2745,71 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
     except Exception:
         return "", ""
 
+    _social_sleep()
+
+    _px = {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY} if _BYPASS_PROXY else None
+
+    # ── Strategy 1: web_profile_info API (JSON, fastest) ───────────────────────
     api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    _ua = random.choice(_SOCIAL_UA_LIST)
     headers = {
         "x-ig-app-id":      "936619743392459",
-        "User-Agent":       random.choice(_SOCIAL_UA_LIST),
+        "User-Agent":       _ua,
         "Accept":           "*/*",
         "Accept-Language":  "en-US,en;q=0.9",
         "Referer":          f"https://www.instagram.com/{username}/",
         "X-Requested-With": "XMLHttpRequest",
+        "sec-fetch-site":   "same-origin",
+        "sec-fetch-mode":   "cors",
+        "sec-fetch-dest":   "empty",
     }
+    for _profile in random.sample(_CFFI_IG_PROF, len(_CFFI_IG_PROF)):
+        try:
+            sess = cffi_requests.Session(impersonate=_profile)
+            r = sess.get(api_url, headers=headers, proxies=_px, timeout=20)
+            if r.status_code == 200:
+                data = r.json()
+                user = data.get("data", {}).get("user", {})
+                if user:
+                    posts_raw     = user.get("edge_owner_to_timeline_media", {}).get("count", "")
+                    followers_raw = user.get("edge_followed_by", {}).get("count", "")
+                    posts_str     = str(int(posts_raw))     if posts_raw != "" else ""
+                    followers_str = str(int(followers_raw)) if followers_raw != "" else ""
+                    if posts_str or followers_str:
+                        return posts_str, followers_str
+            log.debug(f"  IG API status {r.status_code} for @{username} ({_profile})")
+        except Exception as e:
+            log.debug(f"  IG API error for @{username} ({_profile}): {e}")
+
+    # ── Strategy 2: profile page HTML — extract from embedded JSON ──────────────
     try:
-        sess = cffi_requests.Session(impersonate=random.choice(_CFFI_IG_PROF))
-        r = sess.get(api_url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            user = data.get("data", {}).get("user", {})
-            if user:
-                posts_raw     = user.get("edge_owner_to_timeline_media", {}).get("count", "")
-                followers_raw = user.get("edge_followed_by", {}).get("count", "")
-                posts_str     = str(int(posts_raw))     if posts_raw     != "" else ""
-                followers_str = str(int(followers_raw)) if followers_raw != "" else ""
-                return posts_str, followers_str
-        log.debug(f"  IG API status {r.status_code} for @{username}")
+        _headers2 = {
+            "User-Agent":      _ua,
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer":         "https://www.instagram.com/",
+        }
+        sess2 = cffi_requests.Session(impersonate=random.choice(_CFFI_IG_PROF))
+        r2 = sess2.get(f"https://www.instagram.com/{username}/", headers=_headers2,
+                       proxies=_px, timeout=20)
+        if r2.status_code == 200:
+            pm = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', r2.text)
+            fm = re.search(r'"edge_followed_by".*?"count":(\d+)', r2.text)
+            if pm or fm:
+                return (pm.group(1) if pm else ""), (fm.group(1) if fm else "")
+            # fallback: meta description
+            soup2 = BeautifulSoup(r2.text, "lxml")
+            meta2 = soup2.find("meta", attrs={"name": "description"})
+            if meta2:
+                desc2 = meta2.get("content", "")
+                pm2 = re.search(r"([\d,]+)\s*Posts?", desc2, re.I)
+                fm2 = re.search(r"([\d,]+)\s*Followers?", desc2, re.I)
+                if pm2 or fm2:
+                    return (pm2.group(1).replace(",", "") if pm2 else ""), \
+                           (fm2.group(1).replace(",", "") if fm2 else "")
     except Exception as e:
-        log.debug(f"  IG API error for @{username}: {e}")
+        log.debug(f"  IG profile-page error for @{username}: {e}")
+
     return "", ""
 
 
@@ -2736,6 +2829,7 @@ def get_tiktok_stats(tt_url: str) -> tuple[str, str]:
     except Exception:
         return "", ""
 
+    _social_sleep()
     url = f"https://www.tiktok.com/@{username}"
     headers = {
         "User-Agent":      random.choice(_SOCIAL_UA_LIST),
@@ -2743,10 +2837,11 @@ def get_tiktok_stats(tt_url: str) -> tuple[str, str]:
         "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
         "Referer":         "https://www.tiktok.com/",
     }
+    _px = {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY} if _BYPASS_PROXY else None
     for profile in random.sample(_CFFI_PROFILES, len(_CFFI_PROFILES)):
         try:
             sess = cffi_requests.Session(impersonate=profile)
-            r = sess.get(url, headers=headers, timeout=20, allow_redirects=True)
+            r = sess.get(url, headers=headers, proxies=_px, timeout=20, allow_redirects=True)
             if r.status_code != 200:
                 continue
             html = r.text
