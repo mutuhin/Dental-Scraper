@@ -55,8 +55,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-INPUT_FILE   = "100data.xlsx"
-OUTPUT_FILE  = "100data.xlsx"
+INPUT_FILE   = "batch_01_rows1_100.xlsx"
+OUTPUT_FILE  = "batch_01_rows1_100.xlsx"
 
 DELAY_MIN    = 6.0        # minimum seconds between Google requests
 DELAY_MAX    = 13.0       # maximum (random jitter)
@@ -416,10 +416,19 @@ def extract_rating_maps_pw(pw_page) -> tuple:
 
 # ── Search functions ───────────────────────────────────────────────────────────
 
-def _maps_navigate_and_extract(pw_page, query: str, domain: str = "") -> tuple:
+def _name_score(candidate: str, target: str) -> int:
+    """Rough word-overlap score between two practice names (case-insensitive)."""
+    _stop = {"dentist", "dental", "family", "the", "and", "of", "dr", "dds", "dmd", "inc", "llc", "pa"}
+    t_words = {w for w in re.split(r'\W+', target.lower()) if w and w not in _stop}
+    c_words = {w for w in re.split(r'\W+', candidate.lower()) if w and w not in _stop}
+    return len(t_words & c_words)
+
+
+def _maps_navigate_and_extract(pw_page, query: str, domain: str = "",
+                                practice_name: str = "") -> tuple:
     """
-    Navigate Google Maps with query, try to identify the right listing,
-    click it, and return (rating, count).
+    Navigate Google Maps with query, pick the best-matching listing, return (rating, count).
+    Prefers name-matched result over first result to avoid returning the wrong practice.
     """
     url = f"https://www.google.com/maps/search/{quote_plus(query)}?hl=en&gl=us"
     _human_delay(pw_page)
@@ -436,25 +445,34 @@ def _maps_navigate_and_extract(pw_page, query: str, domain: str = "") -> tuple:
     if "/maps/place/" in pw_page.url:
         return extract_rating_maps_pw(pw_page)
 
-    # List of results — try to find one matching domain, else take the first
+    # List of results — pick best match by name > domain > first
     try:
         links = pw_page.query_selector_all('a[href*="/maps/place/"]')
-        target = None
-        if domain:
-            for link in links[:6]:
-                try:
-                    card_text = link.evaluate(
-                        "el => el.closest('[role=\"listitem\"]')?.innerText || ''"
-                    )
-                    if domain in card_text.lower():
-                        target = link
-                        break
-                except Exception:
-                    pass
-        if target is None and links:
-            target = links[0]
-        if target:
-            target.click()
+        best_link   = None
+        best_score  = -1
+
+        for link in links[:8]:
+            try:
+                card_text = link.evaluate(
+                    "el => el.closest('[role=\"listitem\"]')?.innerText || ''"
+                ) or ""
+                score = 0
+                if practice_name:
+                    score = _name_score(card_text, practice_name)
+                elif domain and domain in card_text.lower():
+                    score = 1
+                # Always track first link as minimum fallback (score=-1 means not scored)
+                if best_link is None:
+                    best_link  = link
+                    best_score = score
+                elif score > best_score:
+                    best_link  = link
+                    best_score = score
+            except Exception:
+                continue
+
+        if best_link:
+            best_link.click()
             pw_page.wait_for_timeout(3000)
             return extract_rating_maps_pw(pw_page)
     except Exception as e:
@@ -463,23 +481,52 @@ def _maps_navigate_and_extract(pw_page, query: str, domain: str = "") -> tuple:
     return extract_rating(html)
 
 
+def search_maps_by_name(practice_name: str, doctor_name: str,
+                        address: str, city: str, state: str,
+                        zip_code: str, pw_page) -> tuple:
+    """Google Maps search using practice name + full address for precise matching."""
+    clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
+
+    # Query 1: name + street address (most precise)
+    if clean and address and city:
+        q1 = f"{clean} {address} {city} {state}"
+        log.info(f"  [Maps/name+addr] {q1}")
+        try:
+            r, c = _maps_navigate_and_extract(pw_page, q1, practice_name=clean)
+            if r:
+                return r, c
+        except Exception as e:
+            log.debug(f"  Maps/name+addr error: {e}")
+
+    # Query 2: name + city + zip
+    q2 = f"{clean} dentist {city} {state} {zip_code}".strip()
+    log.info(f"  [Maps/name] {q2}")
+    try:
+        return _maps_navigate_and_extract(pw_page, q2, practice_name=clean)
+    except Exception as e:
+        log.debug(f"  Maps/name error: {e}")
+    return "", ""
+
+
 def search_maps_by_website(domain: str, practice_name: str,
                             city: str, state: str, pw_page) -> tuple:
-    """Method 1 — Google Maps search using the website domain."""
-    query = f"{domain} dental {city} {state}"
+    """Google Maps search using practice name + city (domain not useful as Maps query)."""
+    clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
+    query = f"{clean} dentist {city} {state}" if clean else f"dentist {city} {state}"
     log.info(f"  [Maps/domain] {query}")
     try:
-        return _maps_navigate_and_extract(pw_page, query, domain)
+        return _maps_navigate_and_extract(pw_page, query, domain=domain, practice_name=clean)
     except Exception as e:
         log.debug(f"  Maps/domain error: {e}")
         return "", ""
 
 
-def search_google_by_website(domain: str, pw_page) -> tuple:
-    """Method 2 — Google Web search for the domain → knowledge panel rating."""
-    query = f'"{domain}" dentist'
+def search_google_by_name(practice_name: str, city: str, state: str, pw_page) -> tuple:
+    """Google Web search → knowledge panel rating (fast, no Maps needed)."""
+    clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
+    query = f"{clean} dentist {city} {state}"
     url   = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=us"
-    log.info(f"  [Google/domain] {query}")
+    log.info(f"  [Google/search] {query}")
     try:
         _human_delay(pw_page)
         pw_page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
@@ -491,86 +538,150 @@ def search_google_by_website(domain: str, pw_page) -> tuple:
             html = pw_page.content()
         return extract_rating(html)
     except Exception as e:
-        log.debug(f"  Google/domain error: {e}")
+        log.debug(f"  Google/search error: {e}")
         return "", ""
 
 
-def search_maps_by_name(practice_name: str, doctor_name: str,
-                        address: str, city: str, state: str,
-                        zip_code: str, pw_page) -> tuple:
-    """Method 3 — Google Maps search using practice/doctor name + location."""
-    clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
-    doc   = re.sub(r'^Dr\.?\s+', '', doctor_name or '', flags=re.I)
-    doc   = re.sub(r',?\s*(DDS|DMD|MD).*$', '', doc, flags=re.I).strip()
-
-    if doc and address and city:
-        q = f"{doc} dentist {address} {city} {state}"
-    elif clean and city:
-        q = f"{clean} dentist {city} {state}"
-    else:
-        q = f"{practice_name} dentist {city} {state}"
-
-    log.info(f"  [Maps/name] {q}")
+def _places_details(place_id: str) -> tuple:
+    """Fetch accurate rating + review_count from Places Details API using a place_id."""
+    if not GOOGLE_PLACES_API_KEY or not place_id:
+        return "", ""
     try:
-        return _maps_navigate_and_extract(pw_page, q)
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/place/details/json",
+            params={"place_id": place_id, "fields": "rating,user_ratings_total", "key": GOOGLE_PLACES_API_KEY},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            result = r.json().get("result", {})
+            rating = str(result.get("rating", "")).strip()
+            raw    = result.get("user_ratings_total")
+            count  = str(raw) if raw is not None else ""
+            if rating:
+                return rating, count
     except Exception as e:
-        log.debug(f"  Maps/name error: {e}")
-        return "", ""
+        log.debug(f"  Places Details error: {e}")
+    return "", ""
 
 
-def _places_text_search(query: str) -> tuple:
+def _places_find_place(query: str, city: str, state: str) -> tuple:
     """
-    Call Google Places Text Search API.
+    findplacefromtext API — most accurate for a specific business name + location.
     Returns (rating, review_count) or ("", "").
-    Costs ~$0.017 per call — covered by the free $200/month credit.
     """
     if not GOOGLE_PLACES_API_KEY:
         return "", ""
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    params = {
-        "query":  query,
-        "key":    GOOGLE_PLACES_API_KEY,
-        "region": "us",
-        "type":   "dentist",
-    }
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/place/findplacefromtext/json",
+            params={
+                "input":     query,
+                "inputtype": "textquery",
+                "fields":    "place_id,name,rating,user_ratings_total,formatted_address",
+                "key":       GOOGLE_PLACES_API_KEY,
+            },
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            candidates = data.get("candidates", [])
+            for c in candidates:
+                addr = (c.get("formatted_address") or "").lower()
+                # Validate the result is in the right city/state
+                if city.lower() in addr or state.lower() in addr:
+                    rating = str(c.get("rating", "")).strip()
+                    raw    = c.get("user_ratings_total")
+                    count  = str(raw) if raw is not None else ""
+                    if rating:
+                        return rating, count
+                    # Have place_id but no rating inline — call Details
+                    if c.get("place_id"):
+                        return _places_details(c["place_id"])
+            # If no city/state match, still try first candidate
+            if candidates:
+                c = candidates[0]
+                rating = str(c.get("rating", "")).strip()
+                raw    = c.get("user_ratings_total")
+                count  = str(raw) if raw is not None else ""
+                if rating:
+                    return rating, count
+                if c.get("place_id"):
+                    return _places_details(c["place_id"])
+    except Exception as e:
+        log.debug(f"  findplacefromtext error: {e}")
+    return "", ""
+
+
+def _places_text_search(query: str, city: str = "", state: str = "") -> tuple:
+    """
+    Google Places Text Search API fallback.
+    Validates returned address contains city or state before accepting result.
+    """
+    if not GOOGLE_PLACES_API_KEY:
+        return "", ""
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/place/textsearch/json",
+            params={"query": query, "key": GOOGLE_PLACES_API_KEY, "region": "us", "type": "dentist"},
+            timeout=15,
+        )
         if r.status_code == 200:
             data    = r.json()
             status  = data.get("status", "")
             if status not in ("OK", "ZERO_RESULTS"):
                 log.warning(f"  Places API status: {status}")
             results = data.get("results", [])
-            if results:
-                first  = results[0]
-                rating = str(first.get("rating", "")).strip()
-                # user_ratings_total can be 0 (valid) — use explicit None check
-                raw_count = first.get("user_ratings_total")
-                count = str(raw_count) if raw_count is not None else ""
-                if rating:
-                    return rating, count
+            for res in results[:3]:
+                addr = (res.get("formatted_address") or "").lower()
+                # Accept if no city/state filter, or address matches
+                if not city or city.lower() in addr or (state and state.lower() in addr):
+                    rating    = str(res.get("rating", "")).strip()
+                    raw_count = res.get("user_ratings_total")
+                    count     = str(raw_count) if raw_count is not None else ""
+                    if rating:
+                        return rating, count
     except Exception as e:
-        log.debug(f"  Places API error: {e}")
+        log.debug(f"  Places textsearch error: {e}")
     return "", ""
 
 
-def places_by_website(domain: str, city: str, state: str) -> tuple:
-    """Method 1 — Places API search using the website domain."""
-    if not GOOGLE_PLACES_API_KEY or not domain:
-        return "", ""
-    query = f"{domain} dental {city} {state}"
-    log.info(f"  [Places/domain] {query}")
-    return _places_text_search(query)
-
-
-def places_by_name(practice_name: str, city: str, state: str, zip_code: str) -> tuple:
-    """Method 2 — Places API search using practice name + location."""
+def places_by_name(practice_name: str, city: str, state: str, zip_code: str,
+                   address: str = "") -> tuple:
+    """
+    Places API lookup by practice name + location.
+    Tries findplacefromtext (precise) first, falls back to textsearch.
+    """
     if not GOOGLE_PLACES_API_KEY:
         return "", ""
     clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
-    query = f"{clean} dentist {city} {state} {zip_code}".strip()
+    # Build query with as much location info as possible
+    loc = " ".join(filter(None, [address, city, state, zip_code]))
+    query = f"{clean} dentist {loc}".strip()
     log.info(f"  [Places/name] {query}")
-    return _places_text_search(query)
+    rating, count = _places_find_place(query, city, state)
+    if not rating:
+        rating, count = _places_text_search(query, city, state)
+    return rating, count
+
+
+def places_by_website(domain: str, city: str, state: str,
+                      practice_name: str = "") -> tuple:
+    """
+    Places API lookup by practice name + city (domain alone is not a valid Places query).
+    Falls back to textsearch with domain as a hint only if name is missing.
+    """
+    if not GOOGLE_PLACES_API_KEY:
+        return "", ""
+    if practice_name:
+        clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
+        query = f"{clean} dentist {city} {state}".strip()
+    else:
+        query = f"dentist {city} {state}".strip()
+    log.info(f"  [Places/domain] {query}")
+    rating, count = _places_find_place(query, city, state)
+    if not rating:
+        rating, count = _places_text_search(query, city, state)
+    return rating, count
 
 
 # ── Write helper ───────────────────────────────────────────────────────────────
@@ -729,27 +840,31 @@ def run():
 
             rating, count = "", ""
 
-            # ── Method 1: Google Places API by website domain (fast + free) ────
-            if GOOGLE_PLACES_API_KEY and p["domain"]:
-                rating, count = places_by_website(p["domain"], p["city"], p["state"])
-                if rating:
-                    log.info(f"  ✓ Places/domain: {rating} ★  ({count} reviews)")
-
-            # ── Method 2: Google Places API by practice name ───────────────────
-            if not rating and GOOGLE_PLACES_API_KEY:
-                rating, count = places_by_name(p["practice"], p["city"], p["state"], p["zip"])
+            # ── Method 1: Places API by name + address (most precise) ───────────
+            if GOOGLE_PLACES_API_KEY:
+                rating, count = places_by_name(
+                    p["practice"], p["city"], p["state"], p["zip"], p.get("address", "")
+                )
                 if rating:
                     log.info(f"  ✓ Places/name: {rating} ★  ({count} reviews)")
 
-            # ── Method 3: Google Maps via Playwright by domain ─────────────────
-            if not rating and p["domain"]:
-                rating, count = search_maps_by_website(
-                    p["domain"], p["practice"], p["city"], p["state"], pw_page
+            # ── Method 2: Places API by domain / name fallback ────────────────
+            if not rating and GOOGLE_PLACES_API_KEY and p["domain"]:
+                rating, count = places_by_website(
+                    p["domain"], p["city"], p["state"], p["practice"]
                 )
                 if rating:
-                    log.info(f"  ✓ Maps/domain: {rating} ★  ({count} reviews)")
+                    log.info(f"  ✓ Places/domain: {rating} ★  ({count} reviews)")
 
-            # ── Method 4: Google Maps via Playwright by name + address ─────────
+            # ── Method 3: Google Web Search → knowledge panel (fast) ──────────
+            if not rating:
+                rating, count = search_google_by_name(
+                    p["practice"], p["city"], p["state"], pw_page
+                )
+                if rating:
+                    log.info(f"  ✓ Google/search: {rating} ★  ({count} reviews)")
+
+            # ── Method 4: Google Maps by name + address ────────────────────────
             if not rating:
                 rating, count = search_maps_by_name(
                     p["practice"], p["doctor"],

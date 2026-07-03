@@ -324,36 +324,40 @@ def run():
 
             rating, count = "", ""
 
-            # ── Method 1: Google Places API by domain ─────────────────────────
-            if GOOGLE_PLACES_API_KEY and p["domain"]:
+            # ── Method 1: Places API by name + address (most accurate) ──────────
+            if GOOGLE_PLACES_API_KEY:
                 try:
-                    rating, count = _g.places_by_website(p["domain"], p["city"], p["state"])
-                    if rating:
-                        log.info(f"  ✓ Places/domain: {rating} ★  ({count})")
-                except Exception as e:
-                    log.debug(f"  Places/domain error: {e}")
-
-            # ── Method 2: Google Places API by name ───────────────────────────
-            if not rating and GOOGLE_PLACES_API_KEY:
-                try:
-                    rating, count = _g.places_by_name(p["practice"], p["city"], p["state"], p["zip"])
+                    rating, count = _g.places_by_name(
+                        p["practice"], p["city"], p["state"], p["zip"], p.get("address", "")
+                    )
                     if rating:
                         log.info(f"  ✓ Places/name: {rating} ★  ({count})")
                 except Exception as e:
                     log.debug(f"  Places/name error: {e}")
 
-            # ── Method 3: Google Maps via Playwright by domain ────────────────
-            if not rating and p["domain"]:
+            # ── Method 2: Places API by domain (practice name fallback) ──────
+            if not rating and GOOGLE_PLACES_API_KEY and p["domain"]:
                 try:
-                    rating, count = _g.search_maps_by_website(
-                        p["domain"], p["practice"], p["city"], p["state"], pw_page
+                    rating, count = _g.places_by_website(
+                        p["domain"], p["city"], p["state"], p["practice"]
                     )
                     if rating:
-                        log.info(f"  ✓ Maps/domain: {rating} ★  ({count})")
+                        log.info(f"  ✓ Places/domain: {rating} ★  ({count})")
                 except Exception as e:
-                    log.debug(f"  Maps/domain error: {e}")
+                    log.debug(f"  Places/domain error: {e}")
 
-            # ── Method 4: Google Maps via Playwright by name ──────────────────
+            # ── Method 3: Google Web Search → knowledge panel ─────────────────
+            if not rating:
+                try:
+                    rating, count = _g.search_google_by_name(
+                        p["practice"], p["city"], p["state"], pw_page
+                    )
+                    if rating:
+                        log.info(f"  ✓ Google/search: {rating} ★  ({count})")
+                except Exception as e:
+                    log.debug(f"  Google/search error: {e}")
+
+            # ── Method 4: Google Maps by name + address ───────────────────────
             if not rating:
                 try:
                     rating, count = _g.search_maps_by_name(
