@@ -168,18 +168,38 @@ _SOCIAL_UA_LIST = [
 _CFFI_PROFILES  = ["chrome136", "chrome124", "chrome133a", "chrome110", "safari260", "safari17_2"]
 _CFFI_IG_PROF   = ["chrome124", "chrome136", "safari260"]
 
-# Social-platform throttle — minimum seconds between consecutive FB/IG/TikTok requests.
-# FB/IG block IPs that hit them faster than ~1 req/5s; 4-8s is safe for 100-row batches.
-_SOCIAL_MIN_DELAY = 4.0
-_last_social_hit: list = [0.0]   # mutable singleton so all functions share state
+# Social-platform throttle — 6-12s between hits avoids FB/IG rate-limiting across 100 rows.
+_SOCIAL_MIN_DELAY = 6.0
+_last_social_hit: list = [0.0]
 
 def _social_sleep():
     """Enforce minimum gap between social platform requests."""
     elapsed = time.time() - _last_social_hit[0]
-    wait = _SOCIAL_MIN_DELAY + random.uniform(0, 3) - elapsed
+    wait = _SOCIAL_MIN_DELAY + random.uniform(0, 6) - elapsed
     if wait > 0:
         time.sleep(wait)
     _last_social_hit[0] = time.time()
+
+
+def _fresh_social_proxy() -> "dict | None":
+    """
+    Return a proxies dict with a random Oxylabs session ID so each social
+    request gets a different residential IP (IP rotation per call).
+    Format: http://USER-sessid-RANDOM:PASS@pr.oxylabs.io:7777
+    """
+    if not _BYPASS_PROXY:
+        return None
+    try:
+        import re as _re
+        m = _re.match(r'(https?://)([^:@]+):([^@]+)@(.+)', _BYPASS_PROXY)
+        if m:
+            proto, user, pwd, host = m.groups()
+            sessid = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=10))
+            rotated = f"{proto}{user}-sessid-{sessid}:{pwd}@{host}"
+            return {"http": rotated, "https": rotated}
+    except Exception:
+        pass
+    return {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY}
 
 SERVICE_KEYWORDS = {
     # ── Invisalign ────────────────────────────────────────────────────────────
@@ -2144,12 +2164,96 @@ def find_associations(text):
         "CMDA":  "Christian Medical and Dental Associations",
         "SSC":   "Spear Study Club",
         "TNI":   "The Nashville Institute",
+        # Additional orgs seen across batches
+        "AAOSH": "American Academy for Oral Systemic Health",
+        "DOCS":  "Dental Organization for Conscious Sedation",
+        "OAA":   "Oral Appliance Association",
+        "AAGO":  "American Academy of Gnathologic Orthopedics",
+        "AAFE":  "American Academy of Facial Esthetics",
+        "ABDSM": "American Board of Dental Sleep Medicine",
+        "ASDA":  "American Student Dental Association",
+        "SDA":   "Seventh-day Adventist Dental",
+        "SPEAR": "Spear Education",
+        "KOIS":  "Kois Center",
+        "DAWG":  "Dental Anesthesiology Working Group",
+        "WCLI":  "World Clinical Laser Institute",
+        # Additional state dental associations
+        "IDA":   "Iowa Dental Association",
+        "AzDA":  "Arizona Dental Association",
+        "FDA":   "Florida Dental Association",
+        "MSDA":  "Massachusetts Dental Society",
+        "NYSDA": "New York State Dental Association",
+        "PDA":   "Pennsylvania Dental Association",
+        "ODA":   "Ohio Dental Association",
+        "MODA":  "Missouri Dental Association",
+        "KADA":  "Kansas Dental Association",
+        "NDA":   "Nebraska Dental Association",
+        "OKDA":  "Oklahoma Dental Association",
+        "ArDA":  "Arkansas State Dental Association",
+        "LSDA":  "Louisiana State Dental Association",
+        "MiDA":  "Michigan Dental Association",
+        "ISDA":  "Indiana State Dental Association",
+        "CSDA":  "Connecticut State Dental Association",
+        "RIDA":  "Rhode Island Dental Association",
+        "VSDA":  "Vermont State Dental Association",
+        "NHDA":  "New Hampshire Dental Society",
+        "MEDA":  "Maine Dental Association",
+        "WVDA":  "West Virginia Dental Association",
+        "KYDA":  "Kentucky Dental Association",
+        "ALDA":  "Alabama Dental Association",
+        "MSDS":  "Mississippi Dental Association",
+        "SDDA":  "South Dakota Dental Association",
+        "NDDA":  "North Dakota Dental Association",
+        "MTDA":  "Montana Dental Association",
+        "WYDA":  "Wyoming Dental Association",
+        "NEDA":  "Nevada Dental Association",
+        "NMDA":  "New Mexico Dental Association",
+        "ORDA":  "Oregon Dental Association",
+        "WSDA":  "Washington State Dental Association",
+        "IDA2":  "Idaho Dental Association",
+        "UDA":   "Utah Dental Association",
+        "CODA":  "Colorado Dental Association",
+    }
+
+    # ── Full organization name detection (for sites that spell out the full name) ──
+    _FULL_NAME_MAP = {
+        "american dental association":            "ADA",
+        "academy of general dentistry":           "AGD",
+        "american academy of cosmetic dentistry": "AACD",
+        "american association of orthodontists":  "AAO",
+        "american association of endodontists":   "AAE",
+        "american academy of periodontology":     "AAP",
+        "american academy of pediatric dentistry":"AAPD",
+        "american association of oral":           "AAOMS",
+        "american college of prosthodontists":    "ACP",
+        "american academy of implant dentistry":  "AAID",
+        "international congress of oral implant": "ICOI",
+        "international team for implantology":    "ITI",
+        "academy of osseointegration":            "AO",
+        "american academy of dental sleep":       "AADSM",
+        "american academy for oral systemic":     "AAOSH",
+        "international academy of oral medicine": "IAOMT",
+        "international academy of biological":    "IABDM",
+        "spear education":                        "SPEAR",
+        "spear study club":                       "SSC",
+        "kois center":                            "KOIS",
+        "world clinical laser":                   "WCLI",
+        "christian medical and dental":           "CMDA",
+        "hispanic dental association":            "HDA",
+        "national dental association":            "NDA",
+        "dental organization for conscious":      "DOCS",
     }
     text_upper = text.upper()
+    text_lower = text.lower()
     found = []
     for abbr, full in assoc_map.items():
         # Match abbreviation as a whole word (avoid ADA matching "AAID", etc.)
         if re.search(rf'\b{re.escape(abbr)}\b', text_upper) or full.upper() in text_upper:
+            found.append(abbr)
+
+    # Full organization name detection — catches sites that spell out the name instead of abbrev
+    for phrase, abbr in _FULL_NAME_MAP.items():
+        if phrase in text_lower and abbr not in found:
             found.append(abbr)
 
     # Educational / university affiliations — only when edu-context words are present
@@ -2180,12 +2284,13 @@ def find_associations(text):
                 found.append(abbr)
 
     # ── Membership section scanner ───────────────────────────────────────────
-    # Scan for explicit "Memberships:" / "Member of:" sections and extract
-    # ALL-CAPS abbreviations from them — catches org abbreviations not in the
-    # map (state associations, study clubs, regional societies, etc.)
+    # Handles both inline ("Memberships: ADA, AGD") and bullet-list format
+    # (heading followed by multiple lines, each being one org name/abbrev).
     _MEMB_SECT_RE = re.compile(
-        r'(?:professional\s+)?(?:member(?:ship)?s?(?:\s+of)?|'
-        r'association(?:s)?|affiliation(?:s)?)\s*[:\-–]\s*([^\n]{5,400})',
+        r'(?:professional\s+)?(?:member(?:ship)?s?(?:\s+(?:of|in))?|'
+        r'association(?:s)?|affiliation(?:s)?|credential(?:s)?|'
+        r'professional\s+organization(?:s)?)\s*[:\-–]?\s*\n?'
+        r'((?:[^\n]{2,200}\n?){1,20})',
         re.I,
     )
     _SKIP_SECT_ABBREVS = frozenset({
@@ -2197,12 +2302,21 @@ def find_associations(text):
     })
     for _ms in _MEMB_SECT_RE.finditer(text):
         _mtext = _ms.group(1)
-        for _m in re.finditer(r'\b([A-Z]{2,6})\b', _mtext):
+        # Extract ALL-CAPS abbreviations
+        for _m in re.finditer(r'\b([A-Z]{2,7})\b', _mtext):
             _mabbr = _m.group(1)
             if _mabbr in _SKIP_SECT_ABBREVS:
                 continue
             if _mabbr not in found:
                 found.append(_mabbr)
+        # Also check each bullet line against _FULL_NAME_MAP
+        for _line in _mtext.splitlines():
+            _line_l = _line.strip().lower()
+            if not _line_l:
+                continue
+            for phrase, abbr in _FULL_NAME_MAP.items():
+                if phrase in _line_l and abbr not in found:
+                    found.append(abbr)
 
     return ", ".join(found) if found else ""
 
@@ -2287,36 +2401,56 @@ def find_specialty(text):
     """
     # Ordered from most specific to most general so the list reads naturally
     specialty_map = [
-        ("Cosmetic",        ["cosmetic dent", "esthetic dent", "smile makeover", "cosmetic smile"]),
+        ("Cosmetic",        ["cosmetic dent", "esthetic dent", "aesthetic dent",
+                             "smile makeover", "cosmetic smile", "smile design",
+                             "cosmetic enhancement", "smile transformation"]),
         ("Restorative",     ["restorative dent", "dental restoration", "full mouth restoration",
-                             "full mouth reconstruction", "dental rebuild"]),
+                             "full mouth reconstruction", "dental rebuild",
+                             "reconstructive dent", "biomimetic dent", "rehabilitat"]),
         ("Implants",        ["dental implant", "implant specialist", "implant dentist",
-                             "tooth implant", "all-on-4", "all on 4", "all-on-x"]),
-        ("Orthodontics",    ["orthodontist", "orthodontic"]),
+                             "tooth implant", "all-on-4", "all on 4", "all-on-x",
+                             "implant-supported", "teeth in a day", "same-day implant"]),
+        ("Orthodontics",    ["orthodontist", "orthodontic", "braces specialist",
+                             "teeth straightening", "malocclusion"]),
         ("Invisalign Specialist", ["invisalign specialist", "invisalign provider",
                                    "invisalign diamond", "invisalign platinum", "invisalign gold"]),
-        ("Pediatric",       ["pediatric dent", "children's dent", "kids dent", "child dent"]),
-        ("Periodontics",    ["periodontist", "periodontal", "gum disease specialist"]),
-        ("Endodontics",     ["endodontist", "root canal specialist"]),
+        ("Pediatric",       ["pediatric dent", "children's dent", "kids dent", "child dent",
+                             "children dent", "kids' dent", "baby teeth", "primary teeth"]),
+        ("Periodontics",    ["periodontist", "periodontal", "gum disease specialist",
+                             "gum specialist", "gum treatment", "gum surgery"]),
+        ("Endodontics",     ["endodontist", "root canal specialist", "root canal therapy",
+                             "endodontic specialist"]),
         ("Oral Surgery",    ["oral surgeon", "oral surgery", "wisdom teeth removal",
-                             "third molar", "tooth extraction", "jaw surgery", "maxillofacial"]),
-        ("Prosthodontics",  ["prosthodontist", "prosthodontic"]),
-        ("TMJ / Sleep",     ["tmj", "sleep apnea", "sleep dentistry", "snoring treatment"]),
+                             "wisdom tooth removal", "third molar", "tooth extraction",
+                             "jaw surgery", "maxillofacial", "extractions specialist"]),
+        ("Prosthodontics",  ["prosthodontist", "prosthodontic", "denture specialist",
+                             "crown and bridge specialist"]),
+        ("TMJ / Sleep",     ["tmj", "sleep apnea", "sleep dentistry", "snoring treatment",
+                             "neuromuscular dent", "temporomandibular", "jaw pain specialist",
+                             "airway dent", "oral appliance therapy"]),
         ("Laser",           ["laser dent", "laser treatment", "laser therapy",
                              "soft tissue laser", "laser whitening", "laser technology",
                              "laser procedure", "diode laser", "erbium laser",
                              "biolase", "waterlase", "dental laser"]),
         ("Sedation",        ["sedation dent", "sedation specialist", "sleep dent",
-                             "iv sedation", "nitrous oxide"]),
+                             "iv sedation", "nitrous oxide", "conscious sedation",
+                             "anxiety-free", "fear-free dent", "comfort dent"]),
+        ("Preventive",      ["preventive dent", "preventive care", "preventative dent",
+                             "preventative care", "cavity prevention", "fluoride treatment",
+                             "sealant", "oral health education"]),
+        ("Emergency",       ["emergency dent", "emergency dental", "after-hours dent",
+                             "same-day emergency", "dental emergency", "urgent dental care"]),
         ("Sports Dentistry",["sports dent", "athletic mouthguard", "sports mouthguard"]),
         ("Holistic / Biological", ["holistic dent", "biological dent", "mercury-free",
-                                   "mercury free", "biocompatible"]),
+                                   "mercury free", "biocompatible", "holistic approach",
+                                   "biological approach", "metal-free"]),
         ("Women's Health",  ["women's health", "women's dental", "prenatal dental",
                              "pregnancy dental"]),
         ("Community Health",["community health center", "federally qualified",
-                             "fqhc", "community clinic"]),
+                             "fqhc", "community clinic", "community dent"]),
         ("Family",          ["family dent", "family practice", "comprehensive dental",
-                             "general and family"]),
+                             "general and family", "all ages", "patients of all ages",
+                             "entire family"]),
         ("General",         ["general dent", "general dentist"]),
     ]
 
@@ -2580,12 +2714,13 @@ def _parse_fb_followers(html_or_text: str) -> str:
 
 def _fb_cffi_get(url: str) -> str:
     """
-    Fetch a facebook.com page via curl_cffi (desktop Chrome impersonation) + proxy.
+    Fetch a facebook.com page via curl_cffi + per-call rotating Oxylabs IP.
+    Each call gets a fresh residential IP via session-id rotation.
     Returns raw HTML or "" on failure.
     """
     if not _CFFI_AVAILABLE:
         return ""
-    _px = {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY} if _BYPASS_PROXY else None
+    import base64 as _b64
     _headers = {
         "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
@@ -2593,11 +2728,18 @@ def _fb_cffi_get(url: str) -> str:
         "sec-fetch-site":  "none",
         "sec-fetch-mode":  "navigate",
         "sec-fetch-dest":  "document",
+        "Connection":      "close",   # prevent keep-alive so proxy rotates to new IP
     }
+    # Minimal browser-like cookies so FB doesn't serve a login redirect
+    _datr = _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("=")
+    _fbp  = f"fb.1.{int(time.time() * 1000)}.{random.randint(100000000, 999999999)}"
+    _cookies = {"datr": _datr, "_fbp": _fbp}
     for _profile in ["chrome136", "chrome124", "safari260"]:
         try:
+            _px  = _fresh_social_proxy()   # fresh IP per attempt
             sess = cffi_requests.Session(impersonate=_profile)
-            r = sess.get(url, headers=_headers, proxies=_px, timeout=20, allow_redirects=True)
+            r = sess.get(url, headers=_headers, cookies=_cookies,
+                         proxies=_px, timeout=20, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > 1000:
                 return r.text
         except Exception as _e:
@@ -2747,11 +2889,20 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
 
     _social_sleep()
 
-    _px = {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY} if _BYPASS_PROXY else None
-
-    # ── Strategy 1: web_profile_info API (JSON, fastest) ───────────────────────
-    api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    import base64 as _b64, uuid as _uuid
     _ua = random.choice(_SOCIAL_UA_LIST)
+
+    # Build session-looking cookies that Instagram requires (values don't need to be real)
+    def _ig_cookies():
+        return {
+            "csrftoken": "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", k=32)),
+            "ig_did":    str(_uuid.uuid4()).upper(),
+            "mid":       _b64.b64encode(os.urandom(18)).decode("ascii").rstrip("="),
+            "datr":      _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("="),
+        }
+
+    # ── Strategy 1: web_profile_info API (JSON) ────────────────────────────────
+    api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     headers = {
         "x-ig-app-id":      "936619743392459",
         "User-Agent":       _ua,
@@ -2762,11 +2913,14 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
         "sec-fetch-site":   "same-origin",
         "sec-fetch-mode":   "cors",
         "sec-fetch-dest":   "empty",
+        "Connection":       "close",
     }
     for _profile in random.sample(_CFFI_IG_PROF, len(_CFFI_IG_PROF)):
         try:
+            _px  = _fresh_social_proxy()   # fresh residential IP per attempt
             sess = cffi_requests.Session(impersonate=_profile)
-            r = sess.get(api_url, headers=headers, proxies=_px, timeout=20)
+            r = sess.get(api_url, headers=headers, cookies=_ig_cookies(),
+                         proxies=_px, timeout=20)
             if r.status_code == 200:
                 data = r.json()
                 user = data.get("data", {}).get("user", {})
@@ -2783,15 +2937,17 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
 
     # ── Strategy 2: profile page HTML — extract from embedded JSON ──────────────
     try:
+        _px2 = _fresh_social_proxy()
         _headers2 = {
             "User-Agent":      _ua,
             "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer":         "https://www.instagram.com/",
+            "Connection":      "close",
         }
         sess2 = cffi_requests.Session(impersonate=random.choice(_CFFI_IG_PROF))
         r2 = sess2.get(f"https://www.instagram.com/{username}/", headers=_headers2,
-                       proxies=_px, timeout=20)
+                       cookies=_ig_cookies(), proxies=_px2, timeout=20)
         if r2.status_code == 200:
             pm = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', r2.text)
             fm = re.search(r'"edge_followed_by".*?"count":(\d+)', r2.text)
