@@ -3404,11 +3404,11 @@ def scrape_practice(row, pw_page=None):
                         continue
                     try:
                         full = urljoin(base_url, href)
-                    except ValueError:
-                        continue
-                    if not full.startswith("http"):
-                        continue
-                    if urlparse(full).netloc != urlparse(base_url).netloc:
+                        if not full.startswith("http"):
+                            continue
+                        if urlparse(full).netloc != urlparse(base_url).netloc:
+                            continue
+                    except (ValueError, Exception):
                         continue
                     if any(full.lower().endswith(ext) for ext in _SKIP_EXTS):
                         continue
@@ -3425,12 +3425,11 @@ def scrape_practice(row, pw_page=None):
                 href_l = a["href"].lower()
                 try:
                     full = urljoin(base_url, a["href"])
-                except ValueError:
-                    continue
-                if not full.startswith("http"):
-                    continue
-                # Only same-domain links
-                if urlparse(full).netloc != urlparse(base_url).netloc:
+                    if not full.startswith("http"):
+                        continue
+                    if urlparse(full).netloc != urlparse(base_url).netloc:
+                        continue
+                except (ValueError, Exception):
                     continue
                 if full in already_seen:
                     continue
@@ -3618,16 +3617,17 @@ def scrape_practice(row, pw_page=None):
                     for _a in _sp.find_all("a", href=True):
                         try:
                             _full = urljoin(base_url, _a["href"])
-                        except ValueError:
+                            if not (
+                                _full.startswith("http")
+                                and urlparse(_full).netloc == urlparse(base_url).netloc
+                                and _full not in _l3_seen
+                                and not any(ext in _full.lower() for ext in _SKIP_EXTS)
+                            ):
+                                continue
+                        except (ValueError, Exception):
                             continue
-                        if (
-                            _full.startswith("http")
-                            and urlparse(_full).netloc == urlparse(base_url).netloc
-                            and _full not in _l3_seen
-                            and not any(ext in _full.lower() for ext in _SKIP_EXTS)
-                        ):
-                            _l3_urls.append(_full)
-                            _l3_seen.add(_full)
+                        _l3_urls.append(_full)
+                        _l3_seen.add(_full)
                 if _l3_urls:
                     log.info(f"   Priority L3 pass: {len(_l3_urls)} uncrawled links — fetching up to {L3_LIMIT}")
                 for _l3_url in _l3_urls[:L3_LIMIT]:
@@ -3726,10 +3726,11 @@ def scrape_practice(row, pw_page=None):
                 if any(kw in _href_l for kw in ("service", "treatment", "procedure", "cosmetic")):
                     try:
                         _full = urljoin(base_url, _a["href"])
-                    except ValueError:
+                        if urlparse(_full).netloc != urlparse(base_url).netloc:
+                            continue
+                    except (ValueError, Exception):
                         continue
-                    if (urlparse(_full).netloc == urlparse(base_url).netloc
-                            and _full not in _seen_svc):
+                    if _full not in _seen_svc:
                         _svc_pw_urls.append(_full)
                         _seen_svc.add(_full)
             for _svc_url in _svc_pw_urls[:_svc_pw_cap]:
