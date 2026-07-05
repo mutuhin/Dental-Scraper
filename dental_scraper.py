@@ -3402,7 +3402,10 @@ def scrape_practice(row, pw_page=None):
                     href = a["href"]
                     if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
                         continue
-                    full = urljoin(base_url, href)
+                    try:
+                        full = urljoin(base_url, href)
+                    except ValueError:
+                        continue
                     if not full.startswith("http"):
                         continue
                     if urlparse(full).netloc != urlparse(base_url).netloc:
@@ -3420,7 +3423,10 @@ def scrape_practice(row, pw_page=None):
             links = []
             for a in soup_obj.find_all("a", href=True):
                 href_l = a["href"].lower()
-                full = urljoin(base_url, a["href"])
+                try:
+                    full = urljoin(base_url, a["href"])
+                except ValueError:
+                    continue
                 if not full.startswith("http"):
                     continue
                 # Only same-domain links
@@ -3610,7 +3616,10 @@ def scrape_practice(row, pw_page=None):
                 _l3_urls = []
                 for _, _sp in [(None, all_soup)] + all_scraped_soups:
                     for _a in _sp.find_all("a", href=True):
-                        _full = urljoin(base_url, _a["href"])
+                        try:
+                            _full = urljoin(base_url, _a["href"])
+                        except ValueError:
+                            continue
                         if (
                             _full.startswith("http")
                             and urlparse(_full).netloc == urlparse(base_url).netloc
@@ -3715,7 +3724,10 @@ def scrape_practice(row, pw_page=None):
             for _a in all_soup.find_all("a", href=True):
                 _href_l = _a["href"].lower()
                 if any(kw in _href_l for kw in ("service", "treatment", "procedure", "cosmetic")):
-                    _full = urljoin(base_url, _a["href"])
+                    try:
+                        _full = urljoin(base_url, _a["href"])
+                    except ValueError:
+                        continue
                     if (urlparse(_full).netloc == urlparse(base_url).netloc
                             and _full not in _seen_svc):
                         _svc_pw_urls.append(_full)
