@@ -1018,6 +1018,11 @@ _INVALID_NAME_WORDS = frozenset({
     "this", "that", "from", "about", "also", "only",
     "after", "before", "during", "when", "what", "where",
     "open", "closed", "hours", "call", "visit", "book", "now",
+    # credential / course words — never a real name component
+    # prevents "Specialty Certificate", "Continuing Education", etc.
+    "certificate", "certification", "certificates",
+    "specialty", "training", "continuing", "education",
+    "graduate", "degree", "residency", "fellowship",
 })
 
 def _is_valid_doctor_name(name: str) -> bool:
@@ -1276,6 +1281,12 @@ def _extract_specialty_hint_from_bio(bio_soup, name_core: str) -> str:
         r'restorat|preventi|specialist|surgeon)\b',
         re.I,
     )
+    _HINT_NAV_RE = re.compile(
+        r'(?:about\s+us|our\s+dent|our\s+doctor|meet\s+(?:the|our)|'
+        r'\bhome\b|our\s+team|patient\s+portal|request\s+appoint)',
+        re.I,
+    )
+    _HINT_CRED_RE = re.compile(r',\s*(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI)\b', re.I)
     core_words = [w for w in name_core.split() if len(w) > 2]
     if not core_words:
         return ""
@@ -1290,7 +1301,9 @@ def _extract_specialty_hint_from_bio(bio_soup, name_core: str) -> str:
             sib_text = sib.get_text(separator=" ", strip=True)
             if not sib_text or len(sib_text) < 5:
                 continue
-            if len(sib_text) <= 90 and _HINT_RE.search(sib_text):
+            if (len(sib_text) <= 90 and _HINT_RE.search(sib_text)
+                    and not _HINT_NAV_RE.search(sib_text)
+                    and not _HINT_CRED_RE.search(sib_text)):
                 return sib_text
             if len(sib_text) > 200:
                 break
@@ -1313,6 +1326,20 @@ def _parse_team_page_for_doctors(soup):
         r'\b(?:dentistry|dentist|dds|dmd|orthodon|periodon|endodon|'
         r'prosthodon|oral\s+surg|hygien|implant|cosmetic|pediatric|'
         r'restorat|preventi|specialist|surgeon)\b',
+        re.I,
+    )
+    # Rejects breadcrumb/nav text accidentally captured as specialty hints.
+    # "About Us Our Dentists John Bacchetta, DDS" has "dentist" → would pass
+    # _SPEC_HINT_RE, but is navigation text, not a specialty label.
+    _SPEC_HINT_REJECT_RE = re.compile(
+        r'(?:about\s+us|our\s+dent|our\s+doctor|meet\s+(?:the|our)|'
+        r'\bhome\b|our\s+team|our\s+staff|our\s+provider|'
+        r'patient\s+portal|request\s+appoint)',
+        re.I,
+    )
+    # Credential at end of a short text → it's a name, not a role label.
+    _SPEC_HINT_HAS_NAME_CRED_RE = re.compile(
+        r',\s*(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI)\b',
         re.I,
     )
 
@@ -1454,7 +1481,9 @@ def _parse_team_page_for_doctors(soup):
                 _sh_text = _sh_sib.get_text(separator=" ", strip=True)
                 if not _sh_text or len(_sh_text) < 5:
                     continue
-                if len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text):
+                if (len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text)
+                        and not _SPEC_HINT_REJECT_RE.search(_sh_text)
+                        and not _SPEC_HINT_HAS_NAME_CRED_RE.search(_sh_text)):
                     _spec_hint = _sh_text
                     break
                 if len(_sh_text) > 200:
@@ -1544,7 +1573,9 @@ def _parse_team_page_for_doctors(soup):
                 _sh_text = _sh_sib.get_text(separator=" ", strip=True)
                 if not _sh_text or len(_sh_text) < 5:
                     continue
-                if len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text):
+                if (len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text)
+                        and not _SPEC_HINT_REJECT_RE.search(_sh_text)
+                        and not _SPEC_HINT_HAS_NAME_CRED_RE.search(_sh_text)):
                     _spec_hint_sec = _sh_text
                     break
                 if len(_sh_text) > 200:
@@ -1990,9 +2021,19 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             # Apply specialty_hint from card subtitle as fallback when all
             # bio-based extraction failed to find a meaningful phrase.
             _spec_hint_val = sec.get("specialty_hint", "")
-            if _spec_hint_val and not re.match(
-                r'^(?:dds|dmd|md|doctor)\s*$', _spec_hint_val, re.I
-            ):
+            _spec_hint_nav_re = re.compile(
+                r'(?:about\s+us|our\s+dent|our\s+doctor|meet\s+(?:the|our)|'
+                r'\bhome\b|our\s+team|our\s+staff|our\s+provider|'
+                r'patient\s+portal|request\s+appoint)',
+                re.I,
+            )
+            _spec_hint_cred_re = re.compile(
+                r',\s*(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI)\b', re.I,
+            )
+            if (_spec_hint_val
+                    and not re.match(r'^(?:dds|dmd|md|doctor)\s*$', _spec_hint_val, re.I)
+                    and not _spec_hint_nav_re.search(_spec_hint_val)
+                    and not _spec_hint_cred_re.search(_spec_hint_val)):
                 if not _specialty or _specialty == "Not Found":
                     _specialty = _spec_hint_val
                 elif _specialty in (
