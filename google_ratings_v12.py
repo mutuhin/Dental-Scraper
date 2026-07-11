@@ -266,13 +266,17 @@ def extract_rating(html: str) -> tuple:
 
     # ── Method 4: visible text patterns ───────────────────────────────────────
     text = soup.get_text(" ", strip=True)
-    rm = re.search(r"\b([1-5]\.\d)\s*(?:out of 5|stars?|\()", text, re.I)
+    # Also trigger on middot (·) — Google uses "4.8 · 342 reviews" format
+    rm = re.search(r"\b([1-5]\.\d)\s*(?:out of 5|stars?|\(|·|·)", text, re.I)
+    _m4_rating = ""
     if rm:
         g_rating = rm.group(1)
         for pat in (
             r"\(" + re.escape(g_rating) + r"[^\)]*\)\s*([\d,]+)\s*(?:Google reviews?|reviews?)",
             r"\((\d[\d,]+)\)\s*(?:Google reviews?|reviews?)",
-            r"([\d,]+)\s*(?:Google reviews?|reviews?)",
+            r"([\d,]+)\s*(?:Google reviews?|reviews?|Google ratings?)",
+            r"·\s*([\d,]+)",       # "4.8 · 342 reviews" — Google middot format
+            r"·\s*([\d,]+)",            # plain ASCII middot variant
             r"\((\d[\d,]+)\)",          # bare (439) — Maps result cards, no "reviews" text
         ):
             cm = re.search(pat, text, re.I)
@@ -281,8 +285,10 @@ def extract_rating(html: str) -> tuple:
                 if g_rating == "1.0" and int(count or "0") <= 1:
                     break
                 return g_rating, count
+        # Don't return yet — fall through so methods 5 & 6 can still find count
+        # in a different layout (e.g. multiline or (NNN) format)
         if g_rating != "1.0":
-            return g_rating, ""
+            _m4_rating = g_rating
 
     # ── Method 5: "4.8 (342)" — allow newlines between rating and count ────────
     # [^\n]{0,30} was the old pattern; [\s\S]{0,60}? handles multiline layout
@@ -298,6 +304,17 @@ def extract_rating(html: str) -> tuple:
             candidate = int(cm.group(1).replace(",", ""))
             if candidate >= 1:
                 return rm_r.group(1), cm.group(1).replace(",", "")
+
+    # ── Method 7: look for count without "()" near any rating ──────────────────
+    for rm_r in re.finditer(r"\b([1-5]\.\d)\b", text):
+        window = text[rm_r.start(): rm_r.start() + 300]
+        cm = re.search(r"([\d,]+)\s*(?:Google reviews?|reviews?|ratings?)", window, re.I)
+        if cm:
+            return rm_r.group(1), cm.group(1).replace(",", "")
+
+    # If method 4 found a rating but no count format matched, return rating alone
+    if _m4_rating:
+        return _m4_rating, ""
 
     return "", ""
 
@@ -389,27 +406,43 @@ def extract_rating_maps_pw(pw_page) -> tuple:
                             const t = (el.textContent || '').trim();
                             let m = t.match(/^\\((\\d[\\d,]*)\\)$/);
                             if (m) return m[1].replace(/,/g,'');
-                            m = t.match(/^(\\d[\\d,]*)\\s+reviews?$/i);
+                            m = t.match(/^(\\d[\\d,]*)\\s+(?:Google\\s+)?reviews?$/i);
                             if (m) return m[1].replace(/,/g,'');
                         }
-                        // Pass 2: any element containing "NNN reviews" somewhere
+                        // Pass 2: any element containing "NNN reviews" or "NNN Google reviews"
                         for (const el of document.querySelectorAll('span, button, a, div')) {
                             const t = (el.textContent || '').trim();
-                            const m = t.match(/(\\d[\\d,]+)\\s+reviews?/i);
-                            if (m && t.length < 80) return m[1].replace(/,/g,'');
+                            const m = t.match(/(\\d[\\d,]+)\\s+(?:Google\\s+)?reviews?/i);
+                            if (m && t.length < 100) return m[1].replace(/,/g,'');
                         }
-                        // Pass 3: full page body text
+                        // Pass 3: aria-label on any element mentioning reviews
+                        for (const el of document.querySelectorAll('[aria-label]')) {
+                            const lbl = el.getAttribute('aria-label') || '';
+                            const m = lbl.match(/(\\d[\\d,]+)\\s+(?:Google\\s+)?reviews?/i);
+                            if (m) return m[1].replace(/,/g,'');
+                        }
+                        // Pass 4: full page body text
                         const body = document.body.innerText || '';
-                        const m = body.match(/(\\d[\\d,]+)\\s+reviews?/i);
+                        const m = body.match(/(\\d[\\d,]+)\\s+(?:Google\\s+)?reviews?/i);
                         return m ? m[1].replace(/,/g,'') : '';
                     }
                 """) or ""
             except Exception:
                 pass
 
-    # ── Step 3: if still no rating, fall back to full-page HTML parse ────────────
-    if not rating:
-        return extract_rating(pw_page.content())
+    # ── Step 3: fall back to full-page HTML parse ────────────────────────────────
+    # If no rating at all, let extract_rating try every method on raw HTML.
+    # If we have a rating but lost the count, use extract_rating's count only.
+    if not rating or not count:
+        try:
+            html_rating, html_count = extract_rating(pw_page.content())
+            if not rating and html_rating:
+                rating = html_rating
+                count  = html_count
+            elif rating and not count and html_count:
+                count = html_count
+        except Exception:
+            pass
 
     return rating, count
 
@@ -593,6 +626,11 @@ def _places_find_place(query: str, city: str, state: str) -> tuple:
                     raw    = c.get("user_ratings_total")
                     count  = str(raw) if raw is not None else ""
                     if rating:
+                        # user_ratings_total sometimes absent — get it from Details
+                        if not count and c.get("place_id"):
+                            _, dc = _places_details(c["place_id"])
+                            if dc:
+                                count = dc
                         return rating, count
                     # Have place_id but no rating inline — call Details
                     if c.get("place_id"):
@@ -604,6 +642,10 @@ def _places_find_place(query: str, city: str, state: str) -> tuple:
                 raw    = c.get("user_ratings_total")
                 count  = str(raw) if raw is not None else ""
                 if rating:
+                    if not count and c.get("place_id"):
+                        _, dc = _places_details(c["place_id"])
+                        if dc:
+                            count = dc
                     return rating, count
                 if c.get("place_id"):
                     return _places_details(c["place_id"])
@@ -639,6 +681,11 @@ def _places_text_search(query: str, city: str = "", state: str = "") -> tuple:
                     raw_count = res.get("user_ratings_total")
                     count     = str(raw_count) if raw_count is not None else ""
                     if rating:
+                        # user_ratings_total sometimes absent — get it from Details
+                        if not count and res.get("place_id"):
+                            _, dc = _places_details(res["place_id"])
+                            if dc:
+                                count = dc
                         return rating, count
     except Exception as e:
         log.debug(f"  Places textsearch error: {e}")
