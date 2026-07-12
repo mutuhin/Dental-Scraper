@@ -1363,6 +1363,14 @@ def _parse_team_page_for_doctors(soup):
                 continue
             if any(w.lower() in name.lower() for w in _SKIP_WORDS):
                 continue
+            # Require at least first + last name (reject "Dr. John" first-name-only)
+            _name_body_chk = re.sub(r'^Dr\.?\s+', '', name, flags=re.I).strip()
+            _name_body_chk = re.sub(
+                r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD'
+                r'|ABOD|ABCD|Ph\.?D\.?).*$', '', _name_body_chk, flags=re.I
+            ).strip()
+            if len([w for w in _name_body_chk.split() if len(w.strip('.,')) > 1]) < 2:
+                continue  # first-name only — wait for a heading with the full name
             if name.lower() in seen_names:
                 continue
             seen_names.add(name.lower())
@@ -1386,9 +1394,18 @@ def _parse_team_page_for_doctors(soup):
                 re.I,
             )
             _BIO_TEXT_RE = re.compile(
-                r'bio|learn\s+more|meet|read\s+more|profile|about\s+dr|about\s+the',
+                r'bio|learn\s+more|meet|read\s+more|view\s+more|profile|'
+                r'about\s+dr|about\s+the|our\s+doctor|more\s+about',
                 re.I,
             )
+            # Slug words from the doctor's name for href matching
+            # (catches /dr-john-smith, /john-smith, /smith-dds etc.)
+            _bio_name_words = {
+                w.lower() for w in re.split(r'\W+',
+                    re.sub(r'^Dr\.?\s+', '', name, flags=re.I))
+                if len(w) >= 4
+                and w.lower() not in {'doctor', 'dental', 'dentist', 'smith'}
+            }
             bio_url = ""
             _bio_fallback = ""
             search_node = parent or heading
@@ -1402,7 +1419,12 @@ def _parse_team_page_for_doctors(soup):
                     if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
                         continue
                     link_text = a.get_text(strip=True)
+                    href_lower = href.lower()
                     if _BIO_HREF_RE.search(href) or _BIO_TEXT_RE.search(link_text):
+                        bio_url = href
+                        break
+                    # Doctor's name slug in href: /dr-john-smith or /john-smith
+                    if _bio_name_words and any(w in href_lower for w in _bio_name_words):
                         bio_url = href
                         break
                     if not _bio_fallback:
@@ -1559,12 +1581,34 @@ def _parse_team_page_for_doctors(soup):
                 continue
             seen_names.add(htext_ascii.lower())
             bio_text = raw.lower()
+            # Smart bio URL discovery (same logic as main heading pass)
+            _bio2_href_re = re.compile(
+                r'team|doctor|provider|staff|bio|profile|meet|about|physician', re.I)
+            _bio2_text_re = re.compile(
+                r'bio|learn\s+more|meet|read\s+more|view\s+more|profile|'
+                r'about\s+dr|about\s+the|our\s+doctor|more\s+about', re.I)
+            _bio2_name_words = {
+                w.lower() for w in re.split(r'\W+', htext_ascii)
+                if len(w) >= 4 and w.lower() not in {'doctor', 'dental', 'dentist'}
+            }
             bio_url = ""
+            _bio2_fallback = ""
             for a in tag.find_all("a", href=True):
                 href = a.get("href", "")
-                if href and not href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                    continue
+                link_text = a.get_text(strip=True)
+                href_lower = href.lower()
+                if _bio2_href_re.search(href) or _bio2_text_re.search(link_text):
                     bio_url = href
                     break
+                if _bio2_name_words and any(w in href_lower for w in _bio2_name_words):
+                    bio_url = href
+                    break
+                if not _bio2_fallback:
+                    _bio2_fallback = href
+            if not bio_url:
+                bio_url = _bio2_fallback
             # Specialty hint from subtitle sibling of the matched heading
             _spec_hint_sec = ""
             for _sh_sib in htag.next_siblings:
@@ -1861,9 +1905,31 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         for sec in _parse_team_page_for_doctors(sp):
             if _is_location_false_name(sec["name"]):
                 continue
-            if not _is_duplicate_doctor(sec["name"], combined_norms):
-                combined_norms.append(_normalize_name_for_dedup(sec["name"]))
+            new_norm = _normalize_name_for_dedup(sec["name"])
+            new_words = set(new_norm.split())
+            # Find if a duplicate already exists
+            _dup_idx = -1
+            for _ki, _kn in enumerate(combined_norms):
+                _kw = set(_kn.split())
+                if new_words <= _kw or _kw <= new_words:
+                    _dup_idx = _ki
+                    break
+            if _dup_idx == -1:
+                combined_norms.append(new_norm)
                 all_sections_combined.append(sec)
+            else:
+                # Upgrade: if the incoming section has a more complete name,
+                # replace the previously-kept entry so "Dr. John Smith, DDS"
+                # wins over "Dr. John" captured first from a different soup.
+                existing = all_sections_combined[_dup_idx]
+                if _name_completeness_score(sec["name"]) > _name_completeness_score(existing["name"]):
+                    # Carry over bio_url / specialty_hint from old entry if new lacks them
+                    if not sec.get("bio_url") and existing.get("bio_url"):
+                        sec = dict(sec, bio_url=existing["bio_url"])
+                    if not sec.get("specialty_hint") and existing.get("specialty_hint"):
+                        sec = dict(sec, specialty_hint=existing["specialty_hint"])
+                    all_sections_combined[_dup_idx] = sec
+                    combined_norms[_dup_idx] = new_norm
 
     # ── Supplementary names: text-scan ONLY the best team page, and ONLY when
     # heading-based parsing found zero sections.  Scanning full page text on
@@ -1890,7 +1956,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         _multi_doctor = len(all_sections_combined) > 1
         doctors = []
         _pw_bio_uses = 0          # cap Playwright bio fetches per practice
-        _PW_BIO_MAX  = 2 if IS_CI else 4   # CI: 2×15s for JS-rendered bio pages
+        _PW_BIO_MAX  = 3 if IS_CI else 6   # CI: 3×15s for JS-rendered bio pages
         for sec in all_sections_combined:
             bio_text = sec["text"]
             bio_url  = sec.get("bio_url", "")
@@ -1921,7 +1987,15 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                 not re.match(r'Dr\.?\s+', sec["name"], re.I)
                 and not re.search(r',\s*(?:DDS|DMD|MD)', sec["name"], re.I)
             )
-            if bio_url and base_url and (not _specialty or not _assoc or _name_incomplete):
+            # Fetch bio page when specialty OR membership is missing/not found.
+            # "Not Found" is truthy so `not _specialty` alone would miss it;
+            # explicitly check for the sentinel value.
+            _needs_bio = (
+                not _specialty or _specialty == "Not Found"
+                or not _assoc
+                or _name_incomplete
+            )
+            if bio_url and base_url and _needs_bio:
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
                     try:
@@ -1968,7 +2042,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             # This avoids spending 20s per doctor on Playwright when static HTML
             # already has enough text for extraction.
             if (bio_url and pw_page and _static_bio_thin
-                    and not _specialty and not _assoc
+                    and (not _specialty or _specialty == "Not Found" or not _assoc)
                     and _pw_bio_uses < _PW_BIO_MAX):
                 full_bio = urljoin(base_url, bio_url)
                 if urlparse(full_bio).netloc == urlparse(base_url).netloc:
@@ -1976,7 +2050,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         _pw_bio_uses += 1
                         log.info(f"   Doctor bio (PW {_pw_bio_uses}/{_PW_BIO_MAX}): {full_bio}")
                         pw_page.goto(full_bio, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                        pw_page.wait_for_timeout(800 if IS_CI else 2000)
+                        pw_page.wait_for_timeout(1500 if IS_CI else 3000)
                         _pw_bio_html = pw_page.content()
                         if len(_pw_bio_html) > 500:
                             _pw_bio_soup = BeautifulSoup(_pw_bio_html, "lxml")
