@@ -1075,6 +1075,29 @@ _TEAM_HREF_KW = ("doctor", "dentist", "team", "provider", "staff", "meet-the",
                  "about-us", "about_us", "who-we-are", "our-doctor", "our-dentist",
                  "hygienist", "hygiene-team", "about")
 
+# URL segments that indicate a blog/news/article content page.
+# Doctor names found on these pages are article subjects or authors,
+# NOT the practice's own doctors — so these soups are excluded from
+# team-page doctor extraction.
+_CONTENT_PAGE_URL_RE = re.compile(
+    r'/(?:news|blog|blogs|article|articles|post|posts|press-release|'
+    r'press|media|updates|announcements|events|resources|newsletter|'
+    r'podcast|dental-tips|dental-blog|health-tips|patient-education|'
+    r'dental-care-tips|case-stud)(?:/|$)',
+    re.I,
+)
+
+# Heading phrases that signal an article title rather than a team-page header.
+# "A Candid Conversation with Dr. X", "Interview with Dr. X", etc.
+_ARTICLE_TITLE_RE = re.compile(
+    r'\b(?:conversation\s+with|interview\s+with|Q&?A\s+with|'
+    r'candid\s+talk\s+with|written\s+by|featuring\s+dr|'
+    r'spotlight\s+on|in\s+the\s+words\s+of|a\s+chat\s+with|'
+    r'a\s+day\s+in\s+the\s+life\s+of|behind\s+the\s+(?:mask|desk)|'
+    r'getting\s+to\s+know\s+dr|ask\s+(?:the\s+)?dr)\b',
+    re.I,
+)
+
 
 def _ascii_normalize(text: str) -> str:
     """NFKD-normalize unicode → ASCII (ē→e, ñ→n, etc.) for regex matching."""
@@ -1346,6 +1369,11 @@ def _parse_team_page_for_doctors(soup):
     for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5"]):
         heading_text = heading.get_text(separator=" ", strip=True)
         heading_ascii = _ascii_normalize(heading_text)
+        # Skip headings that look like blog/news article titles:
+        # "A Candid Conversation with Dr. Heath Colledge" etc.
+        # These mention a doctor as article subject, not as practice staff.
+        if _ARTICLE_TITLE_RE.search(heading_ascii):
+            continue
         for pattern in _DOCTOR_PATTERNS:
             m = re.search(pattern, heading_ascii)
             if not m:
@@ -1802,7 +1830,9 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
     team_soup = None
     best_section_count = 0
     all_soups_for_team = all_soups_for_team or []
-    for _, sp in all_soups_for_team:
+    for _lbl, sp in all_soups_for_team:
+        if _lbl and _lbl.startswith("content:"):
+            continue  # skip blog/news/article pages — doctors there are article subjects
         secs = _parse_team_page_for_doctors(sp)
         if len(secs) > best_section_count:
             best_section_count = len(secs)
@@ -1899,9 +1929,11 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
     # that appear on service/about pages but not on the main team page)
     all_sections_combined = list(sections)
     combined_norms: list = [_normalize_name_for_dedup(s["name"]) for s in sections]
-    for _, sp in all_soups_for_team:
+    for _lbl, sp in all_soups_for_team:
         if sp is use_soup:
             continue
+        if _lbl and _lbl.startswith("content:"):
+            continue  # skip blog/news/article pages — doctors there are article subjects
         for sec in _parse_team_page_for_doctors(sp):
             if _is_location_false_name(sec["name"]):
                 continue
@@ -3690,7 +3722,14 @@ def scrape_practice(row, pw_page=None):
                 if sub_html:
                     all_text += " " + extract_text(sub_html)
                     sub_soup = BeautifulSoup(sub_html, "lxml")
-                    all_scraped_soups.append((page_label, sub_soup))
+                    # Tag blog/news/article URLs so scrape_doctors_full can
+                    # exclude them from team-page doctor extraction.
+                    _eff_label = (
+                        "content:" + page_label
+                        if _CONTENT_PAGE_URL_RE.search(sub_url)
+                        else page_label
+                    )
+                    all_scraped_soups.append((_eff_label, sub_soup))
                     _merge_socials(sub_soup, sub_html)
                     if result["email"] == "Not Found":
                         found_mail = _check_mailto(sub_soup)
