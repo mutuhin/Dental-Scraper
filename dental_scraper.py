@@ -1023,6 +1023,23 @@ _INVALID_NAME_WORDS = frozenset({
     "certificate", "certification", "certificates",
     "specialty", "training", "continuing", "education",
     "graduate", "degree", "residency", "fellowship",
+    # job title / role words — prevent "Certified Orthodontist, DDS" being a name
+    "orthodontist", "periodontist", "endodontist", "prosthodontist",
+    "surgeon", "hygienist", "specialist", "physician", "therapist",
+    "fellow", "certified", "intensive", "comprehensive", "advanced",
+    "specialized", "associate", "director", "president", "coordinator",
+    "administrator", "receptionist", "manager",
+    # dental procedure / service terms — prevent "Root Canals, DDS" and
+    # "Invisalign Certified" being captured as doctor names from service pages
+    "canal", "canals", "implant", "implants", "invisalign", "veneer", "veneers",
+    "whitening", "braces", "crown", "crowns", "bridge", "bridges",
+    "denture", "dentures", "filling", "fillings", "sealant", "sealants",
+    "extraction", "extractions", "aligner", "aligners", "retainer",
+    "orthodontic", "orthodontics",
+    # institution types — prevent "Texas Children's Hospital" etc.
+    "hospital", "institute", "academy", "university", "college",
+    # "Dr." appearing as a word mid-name ("Dr. Natalie Dr") must be blocked
+    "dr",
 })
 
 def _is_valid_doctor_name(name: str) -> bool:
@@ -1735,20 +1752,25 @@ def _count_hygienists_from_team(soup, _seen=None):
         if not name_key:
             name_key = _extract_hyg_name(raw)
 
-        dedup_key = name_key or re.sub(r"\s+", " ", raw[:80].lower())
-        if dedup_key not in _seen:
-            _seen.add(dedup_key)
+        if not name_key:
+            continue  # no person name found in container — skip
+        if name_key not in _seen:
+            _seen.add(name_key)
             count += 1
 
     # ── Strategy 2: same-element inline scan ─────────────────────────────────
+    # Only count when a person's name is found alongside the credential.
+    # Generic mentions ("our dental hygienists") without a name are skipped
+    # so we don't count keyword occurrences instead of actual people.
     for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "p", "span", "li", "a", "strong", "b"]):
         raw = tag.get_text(strip=True)
         if len(raw) > 200 or not _HYG_CRED_RE.search(raw):
             continue
         name_key = _extract_hyg_name(raw)
-        dedup_key = name_key or re.sub(r"\s+", " ", raw[:60].lower())
-        if dedup_key not in _seen:
-            _seen.add(dedup_key)
+        if not name_key:
+            continue  # no person name found — skip generic mentions
+        if name_key not in _seen:
+            _seen.add(name_key)
             count += 1
 
     return count
