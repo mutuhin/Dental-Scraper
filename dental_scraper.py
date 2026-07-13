@@ -79,6 +79,12 @@ except ImportError:
         "  Falling back to requests-only mode (limited FB/IG/Invisalign data).\n"
     )
 
+try:
+    import anthropic as _anthropic_module
+    _ANTHROPIC_AVAILABLE = True
+except ImportError:
+    _ANTHROPIC_AVAILABLE = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION  — edit these values to control behaviour
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,7 +92,8 @@ INPUT_FILE   = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/6000 Data COM
 OUTPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
 SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
 # In GitHub Actions (CI=true) use tighter limits so 100 practices finish in ~3-4h
-IS_CI        = os.environ.get("CI", "").lower() in ("true", "1")
+IS_CI             = os.environ.get("CI", "").lower() in ("true", "1")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DELAY_SEC    = 0.5  if IS_CI else 2.5   # short in CI — same pages, faster
 TIMEOUT      = 10   if IS_CI else 15
 PW_TIMEOUT   = 15000 if IS_CI else 25000
@@ -1350,6 +1357,124 @@ def _extract_specialty_hint_from_bio(bio_soup, name_core: str) -> str:
     return ""
 
 
+# ── LLM-assisted name validation and specialty/membership extraction ──────────
+# Uses Claude Haiku to catch bad doctor names that slip past the regex blocklist
+# and to extract specialty/memberships when regex patterns come up empty.
+# Both functions are no-ops (fail-open) when ANTHROPIC_API_KEY is not set.
+
+_LLM_NAME_CACHE: dict = {}   # lowercased_name → bool
+_LLM_SPEC_CACHE: dict = {}   # (name_key, bio_prefix) → (specialty, assoc)
+
+
+def _validate_names_llm(candidates: list) -> dict:
+    """
+    Validate a batch of candidate doctor name strings via Claude Haiku.
+    Returns {name: bool} — False = not a real person's name.
+    Caches results within the session.  Falls back to True (keep) on any error.
+    """
+    if not _ANTHROPIC_AVAILABLE or not ANTHROPIC_API_KEY or not candidates:
+        return {n: True for n in candidates}
+
+    result = {}
+    uncached = []
+    for n in candidates:
+        key = n.strip().lower()
+        if key in _LLM_NAME_CACHE:
+            result[n] = _LLM_NAME_CACHE[key]
+        else:
+            uncached.append(n)
+
+    if uncached:
+        try:
+            client = _anthropic_module.Anthropic(api_key=ANTHROPIC_API_KEY)
+            numbered = "\n".join(f"{i+1}. {n}" for i, n in enumerate(uncached))
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=len(uncached) * 10 + 30,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "For each entry, answer only 'yes' if it looks like a real "
+                        "dentist/doctor's personal name (e.g. 'Dr. John Smith', "
+                        "'Jane Doe, DDS') or 'no' if it is a service name, "
+                        "specialty label, abbreviation, business description, or "
+                        "any non-person text. One answer per line: '1. yes'.\n\n"
+                        + numbered
+                    )
+                }]
+            )
+            pairs = re.findall(r'(\d+)\.\s*(yes|no)', resp.content[0].text.lower())
+            for num_s, ans in pairs:
+                idx = int(num_s) - 1
+                if 0 <= idx < len(uncached):
+                    n = uncached[idx]
+                    valid = (ans == "yes")
+                    _LLM_NAME_CACHE[n.strip().lower()] = valid
+                    result[n] = valid
+        except Exception as e:
+            log.debug(f"LLM name validation error: {e}")
+        for n in uncached:         # fail-open for any not returned
+            if n not in result:
+                _LLM_NAME_CACHE[n.strip().lower()] = True
+                result[n] = True
+
+    return result
+
+
+def _extract_specialty_assoc_llm(name: str, bio_text: str) -> tuple:
+    """
+    Extract specialty and professional associations from bio text via Claude Haiku.
+    Used as a fallback when regex-based extraction finds nothing.
+    Returns (specialty_str, assoc_str) — empty strings on any error.
+    """
+    if not _ANTHROPIC_AVAILABLE or not ANTHROPIC_API_KEY:
+        return "", ""
+    bio_text = bio_text.strip()
+    if len(bio_text) < 40:
+        return "", ""
+
+    cache_key = (name.strip().lower(), bio_text[:200])
+    if cache_key in _LLM_SPEC_CACHE:
+        return _LLM_SPEC_CACHE[cache_key]
+
+    try:
+        client = _anthropic_module.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=130,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "From this dental professional's bio text extract:\n"
+                    "1. Their dental specialty or area of focus "
+                    "(one short phrase; leave blank if general dentist or not mentioned)\n"
+                    "2. Their professional associations and memberships "
+                    "(comma-separated abbreviations or names; leave blank if none)\n\n"
+                    f"Bio: {bio_text[:900]}\n\n"
+                    "Reply in this exact format:\n"
+                    "Specialty: <value or blank>\n"
+                    "Memberships: <value or blank>"
+                )
+            }]
+        )
+        text = resp.content[0].text.strip()
+        sm = re.search(r'Specialty:\s*(.*)', text, re.I)
+        mm = re.search(r'Memberships:\s*(.*)', text, re.I)
+        spec  = (sm.group(1).strip() if sm else "").rstrip(".")
+        assoc = (mm.group(1).strip() if mm else "").rstrip(".")
+        _BLANKS = {"not found", "n/a", "none", "blank", "unknown", "-", ""}
+        if spec.lower() in _BLANKS:
+            spec = ""
+        if assoc.lower() in _BLANKS:
+            assoc = ""
+        _LLM_SPEC_CACHE[cache_key] = (spec, assoc)
+        return spec, assoc
+    except Exception as e:
+        log.debug(f"LLM specialty extraction error: {e}")
+        _LLM_SPEC_CACHE[cache_key] = ("", "")
+        return "", ""
+
+
 def _parse_team_page_for_doctors(soup):
     """
     Parse a team/doctor page to find individual doctor sections.
@@ -1921,22 +2046,20 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             except Exception as e:
                 log.debug(f"   Playwright base-url error: {e}")
 
-    # ── Hygienist count — search team page + ALL scraped soups ───────────────
+    # ── Hygienist count — team page first, fall back to homepage only ────────
+    # Scanning ALL scraped soups caused the same hygienist to be found on
+    # multiple sub-pages (team page + about page + homepage), inflating the
+    # count even with name-based deduplication.
     hygienist_count = None
-    _soups_to_check = []
-    if team_soup:
-        _soups_to_check.append(team_soup)
-    for _, _sp in (all_soups_for_team or []):
-        if _sp is not team_soup:
-            _soups_to_check.append(_sp)
-    if homepage_soup and homepage_soup not in _soups_to_check:
-        _soups_to_check.append(homepage_soup)
-
-    # Use a shared seen-set across all soups so the same person is only counted once
     _hyg_seen: set = set()
-    _hyg_total = 0
-    for _sp in _soups_to_check:
-        _hyg_total += _count_hygienists_from_team(_sp, _seen=_hyg_seen)
+    if team_soup:
+        _hyg_total = _count_hygienists_from_team(team_soup, _seen=_hyg_seen)
+        if _hyg_total == 0 and homepage_soup and homepage_soup is not team_soup:
+            _hyg_total = _count_hygienists_from_team(homepage_soup, _seen=_hyg_seen)
+    elif homepage_soup:
+        _hyg_total = _count_hygienists_from_team(homepage_soup, _seen=_hyg_seen)
+    else:
+        _hyg_total = 0
     if _hyg_total > 0:
         hygienist_count = _hyg_total
 
@@ -1997,6 +2120,18 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             if not _is_duplicate_doctor(n, combined_norms):
                 combined_norms.append(_normalize_name_for_dedup(n))
                 all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
+
+    # ── LLM name validation — filter names that slipped past the blocklist ───
+    # Only runs when ANTHROPIC_API_KEY is configured; fails open (keeps all
+    # names) when the API is unavailable so the scraper always produces output.
+    if all_sections_combined and ANTHROPIC_API_KEY and _ANTHROPIC_AVAILABLE:
+        _validity = _validate_names_llm([s["name"] for s in all_sections_combined])
+        _validated = [s for s in all_sections_combined if _validity.get(s["name"], True)]
+        if _validated:   # only replace if at least one name survived
+            all_sections_combined = _validated
+            combined_norms = [_normalize_name_for_dedup(s["name"]) for s in all_sections_combined]
+            log.debug(f"   LLM validation: {len(all_sections_combined)} names kept "
+                      f"(was {len(_validity)})")
 
     if all_sections_combined:
         # ── Follow each doctor's bio link for richer data ─────────────────────
@@ -2144,6 +2279,20 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         _specialty = find_specialty(bio_text)
                         _assoc     = find_associations(bio_text)
                         break
+
+            # Step 3b — LLM fallback: extract specialty/associations when
+            # regex-based extraction found nothing and bio text is available.
+            if (ANTHROPIC_API_KEY and _ANTHROPIC_AVAILABLE and bio_text
+                    and len(bio_text) > 40
+                    and (not _specialty or _specialty == "Not Found")
+                    and not _assoc):
+                _llm_spec, _llm_assoc = _extract_specialty_assoc_llm(
+                    sec["name"], bio_text
+                )
+                if _llm_spec and (not _specialty or _specialty == "Not Found"):
+                    _specialty = _llm_spec
+                if _llm_assoc and not _assoc:
+                    _assoc = _llm_assoc
 
             # Step 4 — output per-doctor result.
             # Apply specialty_hint from card subtitle as fallback when all
