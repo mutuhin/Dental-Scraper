@@ -1047,7 +1047,23 @@ _INVALID_NAME_WORDS = frozenset({
     "hospital", "institute", "academy", "university", "college",
     # "Dr." appearing as a word mid-name ("Dr. Natalie Dr") must be blocked
     "dr",
+    # dental specialty / service area words that appear as "names" on service pages
+    # e.g. "Adult Dentistry, DDS" / "Adolescent Dentistry" / "Special-Needs Dentistry"
+    "dentistry", "periodontics", "endodontics", "prosthodontics", "pedodontics",
+    "adolescent", "adult", "special", "needs",
+    "cosmetic", "preventive", "restorative", "reconstructive", "corrective",
+    "geriatric", "senior", "infant", "toddler", "child", "children",
+    # heading / page-section words captured as names
+    "professional", "membership", "memberships",
+    "service", "services", "location", "locations",
+    "information", "overview", "description", "biography", "profile",
+    "affordable", "local", "premier", "modern",
 })
+
+# Roman numerals and common suffixes that ARE valid all-uppercase name words
+_VALID_UPPER_WORDS = frozenset({"II", "III", "IV", "V", "VI", "VII", "VIII", "JR", "SR"})
+# Word suffixes that mark specialties/fields, never a person's name word
+_MEDICAL_SUFFIXES = ("istry", "ology", "ship", "ships", "tion", "ness", "care", "ment")
 
 def _is_valid_doctor_name(name: str) -> bool:
     """Return False if any word in the name is clearly not a real name component."""
@@ -1061,10 +1077,19 @@ def _is_valid_doctor_name(name: str) -> bool:
     words = stripped.split()
     for w in words:
         # Skip single-letter initials like "M."
-        clean_w = w.strip('.,')
+        clean_w = w.strip('.,-()')
         if len(clean_w) <= 1:
             continue
         if clean_w.lower() in _INVALID_NAME_WORDS:
+            return False
+        # Reject words with field/specialty suffixes: "dentistry", "membership", "organization"
+        lw = clean_w.lower()
+        for suf in _MEDICAL_SUFFIXES:
+            if lw.endswith(suf) and len(clean_w) > 5:
+                return False
+        # Reject all-uppercase abbreviations like "HDC", "OK", "IL", "ADA"
+        # (real name parts are mixed-case; roman numerals / JR / SR are in allow-list)
+        if len(clean_w) >= 2 and clean_w == clean_w.upper() and clean_w not in _VALID_UPPER_WORDS:
             return False
     return True
 
