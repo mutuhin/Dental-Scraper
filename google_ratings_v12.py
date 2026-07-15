@@ -254,15 +254,27 @@ def extract_rating(html: str) -> tuple:
         return found_rating, found_count
 
     # ── Method 3: data-attrid (Google knowledge panel) ────────────────────────
+    _kp_rating = ""
+    _kp_count  = ""
     for tag in soup.find_all(attrs={"data-attrid": True}):
-        if "rating" in tag.get("data-attrid", ""):
-            txt = tag.get_text(" ", strip=True)
-            rm  = re.search(r"([1-5]\.\d)", txt)
+        attr = tag.get("data-attrid", "")
+        txt  = tag.get_text(" ", strip=True)
+        if "rating" in attr and not _kp_rating:
+            rm = re.search(r"([1-5]\.\d)", txt)
             if rm:
+                _kp_rating = rm.group(1)
                 cm = re.search(r"\((\d[\d,]+)\)", txt)
                 if not cm:
                     cm = re.search(r"([\d,]+)\s*reviews?", txt, re.I)
-                return rm.group(1), (cm.group(1).replace(",", "") if cm else "")
+                if cm:
+                    _kp_count = cm.group(1).replace(",", "")
+        # Dedicated review-count data-attrid: "kc:/location/location:user_review_count"
+        if ("review" in attr or "count" in attr) and not _kp_count:
+            cm = re.search(r"([\d,]+)", txt)
+            if cm:
+                _kp_count = cm.group(1).replace(",", "")
+    if _kp_rating:
+        return _kp_rating, _kp_count
 
     # ── Method 4: visible text patterns ───────────────────────────────────────
     text = soup.get_text(" ", strip=True)
@@ -305,12 +317,30 @@ def extract_rating(html: str) -> tuple:
             if candidate >= 1:
                 return rm_r.group(1), cm.group(1).replace(",", "")
 
-    # ── Method 7: look for count without "()" near any rating ──────────────────
+    # ── Method 7: look for count without "()" near any rating — forward & backward
     for rm_r in re.finditer(r"\b([1-5]\.\d)\b", text):
-        window = text[rm_r.start(): rm_r.start() + 300]
-        cm = re.search(r"([\d,]+)\s*(?:Google reviews?|reviews?|ratings?)", window, re.I)
+        # forward window
+        window_fwd = text[rm_r.start(): rm_r.start() + 500]
+        cm = re.search(r"([\d,]+)\s*(?:Google reviews?|reviews?|ratings?)", window_fwd, re.I)
         if cm:
             return rm_r.group(1), cm.group(1).replace(",", "")
+        # backward window — sometimes count appears before the star rating in DOM order
+        window_bwd = text[max(0, rm_r.start() - 300): rm_r.start()]
+        cm = re.search(r"([\d,]+)\s*(?:Google reviews?|reviews?|ratings?)", window_bwd, re.I)
+        if cm:
+            return rm_r.group(1), cm.group(1).replace(",", "")
+
+    # ── Method 8: any "N reviews" anywhere in full text — pair with nearest rating ──
+    # Handles pages where count and rating are far apart in the flattened text.
+    all_counts = list(re.finditer(r"([\d,]+)\s*(?:Google reviews?|reviews?)", text, re.I))
+    all_ratings = list(re.finditer(r"\b([1-5]\.\d)\b", text))
+    if all_counts and all_ratings:
+        # Pick the count with the most reviews (most likely to be the main listing)
+        best_count = max(all_counts, key=lambda m: int(m.group(1).replace(",", "")))
+        count_val  = best_count.group(1).replace(",", "")
+        # Nearest rating to that count position
+        best_rating = min(all_ratings, key=lambda m: abs(m.start() - best_count.start()))
+        return best_rating.group(1), count_val
 
     # If method 4 found a rating but no count format matched, return rating alone
     if _m4_rating:

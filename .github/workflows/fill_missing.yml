@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests beautifulsoup4 openpyxl lxml playwright
+          pip install requests beautifulsoup4 openpyxl lxml playwright curl-cffi anthropic
           playwright install chromium --with-deps
 
       # ── Download the batch artifact ────────────────────────────────────────
@@ -107,12 +107,14 @@ jobs:
         env:
           OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
           OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       # ── Scrape and fill ────────────────────────────────────────────────────
       - name: Fill missing Specialty & Memberships
         env:
           OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
           OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 patch_missing.py --fill input_batch.xlsx --output filled_output.xlsx
 
       # ── Upload result ──────────────────────────────────────────────────────

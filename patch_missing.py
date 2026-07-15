@@ -22,12 +22,13 @@ DEPENDENCIES
 """
 
 import argparse
+import json
 import os
 import re
 import sys
 import time
 import warnings
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urljoin, urlparse
 
 warnings.filterwarnings("ignore")
 
@@ -43,6 +44,29 @@ try:
 except ImportError:
     _HTTP_OK = False
     print("WARNING: pip install requests beautifulsoup4 lxml  — HTTP scraping disabled")
+
+# curl_cffi gives a real browser TLS fingerprint — many sites block plain requests
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CFFI_OK = True
+except ImportError:
+    _CFFI_OK = False
+
+try:
+    import anthropic as _anthropic_module
+    _ANTHROPIC_OK = True
+except ImportError:
+    _ANTHROPIC_OK = False
+
+# Oxylabs rotating proxy credentials (injected via GitHub Secrets)
+_OXY_USER   = os.environ.get("OXYLABS_USER", "")
+_OXY_PASS   = os.environ.get("OXYLABS_PASS", "")
+_USE_PROXY  = bool(_OXY_USER and _OXY_PASS)
+_PROXY_URL  = f"http://{_OXY_USER}:{_OXY_PASS}@pr.oxylabs.io:7777" if _USE_PROXY else ""
+_PROXIES    = {"http": _PROXY_URL, "https": _PROXY_URL} if _USE_PROXY else {}
+
+# Anthropic API key for LLM-based extraction
+_ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 try:
     from playwright.sync_api import sync_playwright
@@ -106,21 +130,35 @@ def _get_session():
     if _SESSION is None:
         _SESSION = requests.Session()
         _SESSION.headers.update(_HEADERS)
+        if _USE_PROXY:
+            _SESSION.proxies.update(_PROXIES)
     return _SESSION
 
 
-def safe_get(url, timeout=12):
+def safe_get(url, timeout=15):
+    """Fetch URL; tries curl_cffi first (browser TLS fingerprint), falls back to requests."""
+    if _CFFI_OK:
+        try:
+            r = _cffi_requests.get(
+                url, timeout=timeout, verify=False, allow_redirects=True,
+                impersonate="chrome110",
+                proxies=_PROXIES if _USE_PROXY else {},
+                headers=_HEADERS,
+            )
+            if r.status_code == 200:
+                return r
+        except Exception:
+            pass
     if not _HTTP_OK:
         return None
     try:
-        r = _get_session().get(url, timeout=timeout, verify=False,
-                               allow_redirects=True)
+        r = _get_session().get(url, timeout=timeout, verify=False, allow_redirects=True)
         return r if r.ok else None
     except Exception:
         return None
 
 
-def get_soup(url, timeout=12):
+def get_soup(url, timeout=15):
     r = safe_get(url, timeout)
     if not r:
         return None, url
@@ -141,10 +179,14 @@ def _pw_start():
         return False
     try:
         _pw = sync_playwright().__enter__()
-        _pw_browser = _pw.chromium.launch(headless=True)
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage"]
+        proxy_cfg = {"server": _PROXY_URL} if _USE_PROXY else None
+        _pw_browser = _pw.chromium.launch(headless=True, args=launch_args,
+                                           proxy=proxy_cfg)
         _pw_context = _pw_browser.new_context(
             user_agent=_HEADERS["User-Agent"],
             locale="en-US",
+            proxy=proxy_cfg,
         )
         return True
     except Exception as e:
@@ -526,6 +568,59 @@ def find_associations(text):
     return ", ".join(found) if found else ""
 
 
+# ── LLM extraction via Claude Haiku ──────────────────────────────────────────
+
+_LLM_CACHE: dict = {}
+
+def _extract_via_llm(doctor_name: str, bio_text: str):
+    """
+    Ask Claude Haiku to pull specialty and professional associations out of a
+    doctor bio.  Returns (specialty_str, assoc_str) — empty strings on failure.
+    Results are cached by (name, text[:200]) so repeated calls are free.
+    """
+    if not _ANTHROPIC_OK or not _ANTHROPIC_KEY:
+        return "", ""
+    if not bio_text or len(bio_text.strip()) < 60:
+        return "", ""
+
+    cache_key = (doctor_name, bio_text[:200])
+    if cache_key in _LLM_CACHE:
+        return _LLM_CACHE[cache_key]
+
+    try:
+        client = _anthropic_module.Anthropic(api_key=_ANTHROPIC_KEY)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=350,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'Extract the dental specialty and professional memberships/associations '
+                    f'for "{doctor_name}" from the bio text below.\n'
+                    f'Return ONLY valid JSON: {{"specialty":"...","associations":"..."}}.\n'
+                    f'Use empty string if not found. Keep each field under 120 characters.\n\n'
+                    f'Bio text (first 2000 chars):\n{bio_text[:2000]}'
+                ),
+            }],
+        )
+        raw = resp.content[0].text.strip()
+        m = re.search(r'\{[^}]+\}', raw, re.DOTALL)
+        if m:
+            data   = json.loads(m.group())
+            spec   = str(data.get("specialty",   "") or "").strip()
+            assoc  = str(data.get("associations","") or "").strip()
+            # sanity — reject very short or obviously wrong values
+            if len(spec)  < 3: spec  = ""
+            if len(assoc) < 3: assoc = ""
+            _LLM_CACHE[cache_key] = (spec, assoc)
+            return spec, assoc
+    except Exception as e:
+        print(f"    [LLM] error for {doctor_name}: {e}")
+
+    _LLM_CACHE[cache_key] = ("", "")
+    return "", ""
+
+
 # ── Per-practice scraping ─────────────────────────────────────────────────────
 
 def scrape_practice(website, doctors_needed):
@@ -566,12 +661,15 @@ def scrape_practice(website, doctors_needed):
         spec  = find_specialty(team_text)    if needed.get("spec")  else ""
         assoc = find_associations(team_text) if needed.get("assoc") else ""
 
+        bio_text_used = team_text
+
         # Fetch individual bio page if still missing
         if (not spec and needed.get("spec")) or (not assoc and needed.get("assoc")):
             if bio_url and bio_url != team_url:
                 print(f"    Fetching bio: {bio_url}")
                 bio_text = _scrape_bio_page(bio_url, name)
                 if bio_text:
+                    bio_text_used = bio_text
                     if not spec  and needed.get("spec"):
                         spec  = find_specialty(bio_text)
                     if not assoc and needed.get("assoc"):
@@ -584,11 +682,24 @@ def scrape_practice(website, doctors_needed):
                     print(f"    Guessed bio: {slug_url}")
                     bio_text = _scrape_bio_page(slug_url, name)
                     if bio_text:
+                        bio_text_used = bio_text
                         if not spec  and needed.get("spec"):
                             spec  = find_specialty(bio_text)
                         if not assoc and needed.get("assoc"):
                             assoc = find_associations(bio_text)
                     time.sleep(0.4)
+
+        # LLM fallback — runs when regex extraction found nothing
+        if (not spec and needed.get("spec")) or (not assoc and needed.get("assoc")):
+            if bio_text_used and len(bio_text_used.strip()) > 60:
+                print(f"    [LLM] Extracting for {name}...")
+                llm_spec, llm_assoc = _extract_via_llm(name, bio_text_used)
+                if not spec  and llm_spec:
+                    spec  = llm_spec
+                    print(f"    [LLM] Specialty: {spec[:60]}")
+                if not assoc and llm_assoc:
+                    assoc = llm_assoc
+                    print(f"    [LLM] Assoc:     {assoc[:60]}")
 
         results[name]["specialty"]     = spec
         results[name]["associations"]  = assoc
