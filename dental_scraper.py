@@ -1119,10 +1119,14 @@ _TEAM_LINK_TEXT = (
     "meet the doctor", "our team", "our provider", "our staff",
     "the team", "about the doctor", "our doctors",
     "about us", "about our team", "our hygienist",
+    "meet your dentist", "meet our dentist", "our location",
 )
 _TEAM_HREF_KW = ("doctor", "dentist", "team", "provider", "staff", "meet-the",
                  "about-us", "about_us", "who-we-are", "our-doctor", "our-dentist",
-                 "hygienist", "hygiene-team", "about")
+                 "hygienist", "hygiene-team", "about",
+                 # location / office pages — multi-location practices list doctors there
+                 "/location/", "/locations/", "/office/", "/offices/",
+                 "/our-location", "/our-office", "/find-us", "/visit-us")
 
 # URL segments that indicate a blog/news/article content page.
 # Doctor names found on these pages are article subjects or authors,
@@ -1950,7 +1954,7 @@ def _find_team_urls(homepage_soup, base_url):
             seen.add(full)
             team_urls.append(full)
 
-    return team_urls[:6]
+    return team_urls[:12]
 
 
 def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
@@ -2133,18 +2137,25 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     all_sections_combined[_dup_idx] = sec
                     combined_norms[_dup_idx] = new_norm
 
-    # ── Supplementary names: text-scan ONLY the best team page, and ONLY when
-    # heading-based parsing found zero sections.  Scanning full page text on
-    # service/blog/testimonial pages (the old "second chance" / "last resort"
-    # loops) was the primary source of false-positive doctor names.
-    if not all_sections_combined and use_soup:
-        all_names = _extract_names_from_soup_strict(use_soup)
-        for n in sorted(all_names, key=lambda x: len(x.split()), reverse=True):
-            if _is_location_false_name(n):
-                continue
-            if not _is_duplicate_doctor(n, combined_norms):
-                combined_norms.append(_normalize_name_for_dedup(n))
-                all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
+    # ── Supplementary names: strict heading-scan when section parsing found zero.
+    # First tries the best team page; if still empty, scans every crawled soup.
+    # This catches sites where doctors are on location/office sub-pages rather
+    # than a dedicated team page (e.g. multi-location chains like dentaldepot.net).
+    if not all_sections_combined:
+        _fallback_soups = ([use_soup] if use_soup else []) + [
+            sp for _lbl, sp in (all_soups_for_team or [])
+            if sp is not use_soup and not (_lbl and _lbl.startswith("content:"))
+        ]
+        for _fb_soup in _fallback_soups:
+            all_names = _extract_names_from_soup_strict(_fb_soup)
+            for n in sorted(all_names, key=lambda x: len(x.split()), reverse=True):
+                if _is_location_false_name(n):
+                    continue
+                if not _is_duplicate_doctor(n, combined_norms):
+                    combined_norms.append(_normalize_name_for_dedup(n))
+                    all_sections_combined.append({"name": n, "text": "", "bio_url": ""})
+            if all_sections_combined:
+                break  # found doctors — stop scanning further soups
 
     # ── LLM name validation — filter names that slipped past the blocklist ───
     # Only runs when ANTHROPIC_API_KEY is configured; fails open (keeps all
@@ -3838,8 +3849,15 @@ def scrape_practice(row, pw_page=None):
             # ── Nav links — capped at NAV_LIMIT in CI to control per-practice time ──
             nav_urls = _collect_nav_links(all_soup, sub_pages_found)
             if len(nav_urls) > NAV_LIMIT:
-                log.info(f"   Nav links capped {len(nav_urls)} → {NAV_LIMIT}")
-                nav_urls = nav_urls[:NAV_LIMIT]
+                # Prioritise pages most likely to contain doctor info so they
+                # are never dropped by the cap (e.g. 28-location chain like
+                # dentaldepot.net where doctor pages are location sub-pages)
+                _PRIORITY_KW = set(_TEAM_HREF_KW) | {"location", "office", "about", "team", "doctor", "dentist"}
+                _pri  = [u for u in nav_urls if any(kw in u.lower() for kw in _PRIORITY_KW)]
+                _rest = [u for u in nav_urls if u not in set(_pri)]
+                nav_urls = (_pri + _rest)[:NAV_LIMIT]
+                log.info(f"   Nav links capped → {NAV_LIMIT} "
+                         f"({len(_pri)} priority team/location pages first)")
             # ── Sitemap links — catches Wix/SPA sites with no <a> nav tags ────
             # Capped at SITEMAP_LIMIT to prevent massive sitemaps from blowing up
             # per-practice time.
