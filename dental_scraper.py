@@ -1758,15 +1758,47 @@ def _parse_team_page_for_doctors(soup):
                 break
         if not _role_short:
             continue
-        for htag in tag.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b", "p", "span"]):
+        # Collect candidate elements: standard heading/inline tags + leaf divs.
+        # Page-builders (Divi, Elementor, custom themes) often wrap doctor names
+        # in <div class="Heading--head"> rather than real <h> tags. We include
+        # those leaf divs so they're not missed.
+        _sec_candidates = list(tag.find_all(
+            ["h1", "h2", "h3", "h4", "h5", "strong", "b", "p", "span"]
+        ))
+        for _leaf in tag.find_all("div"):
+            # A leaf div has no block-level children — it's a styled heading node.
+            if _leaf.find(["div", "p", "section", "ul", "ol",
+                           "h1", "h2", "h3", "h4", "h5"]):
+                continue
+            _lt = _leaf.get_text(" ", strip=True)
+            if 4 <= len(_lt) <= 70:
+                _sec_candidates.append(_leaf)
+
+        for htag in _sec_candidates:
             htext = htag.get_text(separator=" ", strip=True)
             if len(htext) < 4 or len(htext) > 60:
                 continue
             htext_ascii = _ascii_normalize(htext)
             if htext_ascii.lower() in seen_names:
                 continue
-            if any(re.search(p, htext_ascii) for p in _DOCTOR_PATTERNS):
-                continue  # already captured by main loop
+            # If the text already carries a credential (e.g. "Asfia Kauser, DMD"
+            # inside a styled div), capture it directly. The main heading loop
+            # never saw it (headings only), so we must not skip it here.
+            _cred_m = None
+            for _p in _DOCTOR_PATTERNS:
+                _cm = re.search(_p, htext_ascii)
+                if _cm:
+                    _cred_m = _cm
+                    break
+            if _cred_m:
+                _cred_name = re.sub(r"\s+", " ", _cred_m.group(0).strip())
+                if (not re.search(r'\d', _cred_name)
+                        and _is_valid_doctor_name(_cred_name)
+                        and _cred_name.lower() not in seen_names):
+                    seen_names.add(_cred_name.lower())
+                    doctors.append({"name": _cred_name, "text": raw.lower(),
+                                    "bio_url": "", "specialty_hint": ""})
+                continue  # handled — don't also try _PLAIN_NAME_RE2
             if re.search(r'\d', htext_ascii):
                 continue
             if not _PLAIN_NAME_RE2.match(htext_ascii):
@@ -2148,6 +2180,11 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         ]
         for _fb_soup in _fallback_soups:
             all_names = _extract_names_from_soup_strict(_fb_soup)
+            if not all_names:
+                # Heading-only scan found nothing (e.g. names are in styled divs).
+                # Fall back to the full-text credential scanner which picks up
+                # "First Last, DDS" patterns anywhere in the page.
+                all_names = _extract_names_from_soup(_fb_soup)
             for n in sorted(all_names, key=lambda x: len(x.split()), reverse=True):
                 if _is_location_false_name(n):
                     continue
