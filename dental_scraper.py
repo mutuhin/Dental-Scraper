@@ -1354,7 +1354,9 @@ def _extract_specialty_hint_from_bio(bio_soup, name_core: str) -> str:
     _HINT_RE = re.compile(
         r'\b(?:dentistry|dentist|dds|dmd|orthodon|periodon|endodon|'
         r'prosthodon|oral\s+surg|hygien|implant|cosmetic|pediatric|'
-        r'restorat|preventi|specialist|surgeon)\b',
+        r'restorat|preventi|specialist|surgeon|'
+        r'general|family|comprehensive|aesthetic|esthetic|'
+        r'holistic|biolog|invisalign|aligner|prosthet)\b',
         re.I,
     )
     _HINT_NAV_RE = re.compile(
@@ -1470,18 +1472,23 @@ def _extract_specialty_assoc_llm(name: str, bio_text: str) -> tuple:
         client = _anthropic_module.Anthropic(api_key=ANTHROPIC_API_KEY)
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=130,
+            max_tokens=200,
             messages=[{
                 "role": "user",
                 "content": (
-                    "From this dental professional's bio text extract:\n"
-                    "1. Their dental specialty or area of focus "
-                    "(one short phrase; leave blank if general dentist or not mentioned)\n"
-                    "2. Their professional associations and memberships "
-                    "(comma-separated abbreviations or names; leave blank if none)\n\n"
-                    f"Bio: {bio_text[:900]}\n\n"
-                    "Reply in this exact format:\n"
-                    "Specialty: <value or blank>\n"
+                    f"Doctor: {name}\n"
+                    f"Bio text: {bio_text[:1200]}\n\n"
+                    "From the bio text above extract:\n"
+                    "1. Dental specialty or area of focus as a short descriptive phrase.\n"
+                    "   Examples: 'General Dentistry', 'General & Cosmetic Dentistry',\n"
+                    "   'Pediatric Dentistry', 'Orthodontics', 'Oral & Maxillofacial Surgery',\n"
+                    "   'General, Preventive, & Restorative Dentistry'.\n"
+                    "   If they are a general/family dentist or no specific specialty is stated,\n"
+                    "   write 'General Dentistry'. Never leave this blank.\n"
+                    "2. Professional associations and memberships\n"
+                    "   (comma-separated abbreviations like ADA, AGD, AAO; leave blank if none).\n\n"
+                    "Reply in EXACTLY this format (two lines, no extra text):\n"
+                    "Specialty: <value>\n"
                     "Memberships: <value or blank>"
                 )
             }]
@@ -1519,7 +1526,9 @@ def _parse_team_page_for_doctors(soup):
     _SPEC_HINT_RE = re.compile(
         r'\b(?:dentistry|dentist|dds|dmd|orthodon|periodon|endodon|'
         r'prosthodon|oral\s+surg|hygien|implant|cosmetic|pediatric|'
-        r'restorat|preventi|specialist|surgeon)\b',
+        r'restorat|preventi|specialist|surgeon|'
+        r'general|family|comprehensive|aesthetic|esthetic|'
+        r'holistic|biolog|invisalign|aligner|prosthet)\b',
         re.I,
     )
     # Rejects breadcrumb/nav text accidentally captured as specialty hints.
@@ -1857,7 +1866,10 @@ def _parse_team_page_for_doctors(soup):
                     break
             doctors.append({"name": htext_ascii, "text": bio_text, "bio_url": bio_url,
                             "specialty_hint": _spec_hint_sec})
-            break
+            # Use continue (not break) so multiple plain-name doctors in the same
+            # container are all captured (e.g. "Dr. Chen" and "Dr. Christina"
+            # listed together in one team section).
+            continue
 
     # Deduplicate using normalised name matching
     # Sort by word count descending so the most complete name is kept first
@@ -2353,18 +2365,27 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         _assoc     = find_associations(bio_text)
                         break
 
-            # Step 3b — LLM fallback: extract specialty/associations when
-            # regex-based extraction found nothing and bio text is available.
+            # Step 3b — LLM fallback: extract specialty/associations.
+            # Called when EITHER specialty or associations are missing/weak.
+            # Short single-word labels from find_specialty ("General", "Family")
+            # are also treated as missing so the LLM can return a richer phrase
+            # (e.g. "General & Cosmetic Dentistry" instead of just "General").
+            _SHORT_GENERIC = {"General", "Family", "Cosmetic", "Restorative",
+                               "Implants", "Preventive", "Sedation", "Laser",
+                               "Emergency", "Pediatric",
+                               "General Dentistry", "Family Dentistry"}
+            _need_spec  = (not _specialty or _specialty == "Not Found"
+                           or _specialty in _SHORT_GENERIC)
+            _need_assoc = not _assoc
             if (ANTHROPIC_API_KEY and _ANTHROPIC_AVAILABLE and bio_text
                     and len(bio_text) > 40
-                    and (not _specialty or _specialty == "Not Found")
-                    and not _assoc):
+                    and (_need_spec or _need_assoc)):
                 _llm_spec, _llm_assoc = _extract_specialty_assoc_llm(
                     sec["name"], bio_text
                 )
-                if _llm_spec and (not _specialty or _specialty == "Not Found"):
+                if _llm_spec and _need_spec:
                     _specialty = _llm_spec
-                if _llm_assoc and not _assoc:
+                if _llm_assoc and _need_assoc:
                     _assoc = _llm_assoc
 
             # Step 4 — output per-doctor result.
@@ -2389,6 +2410,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                 elif _specialty in (
                     "General", "Family", "Cosmetic", "Restorative",
                     "Implants", "Pediatric", "Laser", "Sedation",
+                    "General Dentistry", "Family Dentistry",
                 ) and len(_spec_hint_val) > len(_specialty):
                     _specialty = _spec_hint_val
 
@@ -2748,7 +2770,7 @@ def _extract_specialty_phrase(text: str) -> str:
         r'biomimetic|holistic|biolog|clear\s+aligner|dental\s+implant)\b',
         re.I,
     )
-    # Reject phrases containing other doctor names, addresses, or generic mission text
+    # Reject phrases containing doctor names, mission text, or bio prose fragments
     _REJECT = re.compile(
         r'\b(?:Dr\.|DDS|DMD|MD\b|C-FNP|NP\b|PA\b|LISW|LCSW|APRN|'
         r'View\s+Profile|Healthsource|Schedule|Appointment|'
@@ -2756,7 +2778,9 @@ def _extract_specialty_phrase(text: str) -> str:
         r'Highest\s+Standard|Highest\s+Level|Constant\s+Pursuit|'
         r'Committed\s+To|Commitment\s+To|Continuing\s+Education\b|'
         r'Patient\s+Care|Our\s+Team|Our\s+Practice|'
-        r'And\s+Is\s+Committ|And\s+Has\s+Spoken)\b',
+        r'And\s+Is\s+Committ|And\s+Has\s+Spoken|'
+        r'Quote\b|Passionate\s+About|Dedicated\s+To|Mission\s+Is|'
+        r'Believe\s+In|Goal\s+Is|Philosophy|I\s+Am\s+Very)\b',
         re.I,
     )
     text_l = text.lower()
@@ -2839,10 +2863,10 @@ def find_specialty(text):
                              "pregnancy dental"]),
         ("Community Health",["community health center", "federally qualified",
                              "fqhc", "community clinic", "community dent"]),
-        ("Family",          ["family dent", "family practice", "comprehensive dental",
+        ("Family Dentistry", ["family dent", "family practice",
                              "general and family", "all ages", "patients of all ages",
                              "entire family"]),
-        ("General",         ["general dent", "general dentist"]),
+        ("General Dentistry", ["general dent", "general dentist", "comprehensive dental"]),
     ]
 
     text_lower = text.lower()
