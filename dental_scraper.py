@@ -2896,6 +2896,19 @@ def find_specialty(text):
     return "Not Found"
 
 
+def _is_corp_linkedin(url: str) -> bool:
+    """Return True if url is a DSO parent company LinkedIn page, not a practice page."""
+    url_lower = url.lower()
+    if "linkedin.com" not in url_lower:
+        return False
+    # Extract the company slug from the path (linkedin.com/company/<slug>/...)
+    m = re.search(r'linkedin\.com/company/([^/?#]+)', url_lower)
+    if not m:
+        return False
+    slug = m.group(1).strip("/.").rstrip("-")
+    return slug in _LINKEDIN_CORP_SLUGS
+
+
 def find_social_links(soup):
     """Extract social media URLs from anchor tags."""
     found = {p: "" for p in SOCIAL_PLATFORMS}
@@ -2903,7 +2916,10 @@ def find_social_links(soup):
         href = a["href"].lower()
         for platform in SOCIAL_PLATFORMS:
             if platform + ".com" in href and not found[platform]:
-                found[platform] = a["href"]
+                raw_href = a["href"]
+                if platform == "linkedin" and _is_corp_linkedin(raw_href):
+                    continue  # skip DSO parent company LinkedIn pages
+                found[platform] = raw_href
     return found
 
 
@@ -2911,6 +2927,44 @@ _SOCIAL_URL_SKIP = (
     "sharer", "/share", "intent/tweet", "api.", "/policy",
     "/help", "/login", "/signup", "/apps", "oauth",
 )
+
+# LinkedIn company slugs that belong to DSO parent corporations, not individual
+# dental practices.  Any URL whose path contains one of these slugs is a
+# footer/nav link to the parent company and must NOT be stored as the practice's
+# own LinkedIn URL.
+_LINKEDIN_CORP_SLUGS = frozenset({
+    "smile-brands-inc", "smile-brands",
+    "dental-care-alliance", "dental-care-alliance-inc",
+    "heartland-dental",
+    "aspen-dental-management",
+    "pacific-dental-services",
+    "midwest-dental",
+    "western-dental-services",
+    "dentalworks",
+    "great-expressions-dental-centers",
+    "kool-smiles",
+    "mb2-dental", "mb2-dental-solutions",
+    "sage-dental",
+    "advantage-dental",
+    "brident-dental",
+    "bright-now-dental",
+    "castle-dental",
+    "monarch-dental",
+    "comfort-dental",
+    "greenberg-dental",
+    "christie-dental",
+    "leap-kids-dental",
+    "merit-dental",
+    "familia-dental",
+    "dental-depot",
+    "perfect-teeth",
+    "western-dental",
+    "towncare-dental",
+    "smiledirectclub",
+    "dentalcorp",
+    "clear-choice-dental-implant-centers",
+    "affordable-care",
+})
 
 
 def find_social_links_regex(html):
@@ -2927,9 +2981,12 @@ def find_social_links_regex(html):
         )
         for m in re.findall(pattern, html, re.IGNORECASE):
             clean = m.split("?")[0].rstrip("/")
-            if not any(s in clean.lower() for s in _SOCIAL_URL_SKIP):
-                found[platform] = clean
-                break   # first non-share URL wins
+            if any(s in clean.lower() for s in _SOCIAL_URL_SKIP):
+                continue
+            if platform == "linkedin" and _is_corp_linkedin(clean):
+                continue  # skip DSO parent company LinkedIn pages
+            found[platform] = clean
+            break   # first non-share, non-corp URL wins
     return found
 
 
