@@ -1937,7 +1937,19 @@ def _count_hygienists_from_team(soup, _seen=None):
         raw = tag.get_text(" ", strip=True)
         if not (20 < len(raw) < 700):
             continue
-        if not _HYG_CRED_RE.search(raw):
+
+        # The credential must appear in a SHORT role-line sub-element (≤ 80 chars),
+        # not just anywhere in the container prose.  Without this guard, doctor bio
+        # cards that say "works with our dental hygienists..." also match, causing
+        # the doctor's own name to be counted as a hygienist.
+        _cred_in_role = False
+        for _rtag in tag.find_all(["p", "span", "div", "h4", "h5",
+                                   "small", "em", "strong", "li"]):
+            _rtext = _rtag.get_text(strip=True)
+            if len(_rtext) <= 80 and _HYG_CRED_RE.search(_rtext):
+                _cred_in_role = True
+                break
+        if not _cred_in_role:
             continue
 
         # Prefer name from a heading inside the container
@@ -4622,58 +4634,6 @@ def write_output(practices_data, output_path):
                 "specialty":    "",
                 "associations": "",
             }]
-
-        # Ensure the practice owner (from "Practice Name" column) appears in
-        # the doctor list IF the column value looks like a personal name.
-        # "Last, First" format → convert to "First Last".
-        # Guard: skip company/practice names (3+ real words without credentials,
-        # e.g. "Secure Dental East Peoria") — only personal names are inserted.
-        raw_owner = str(inp.get("Practice Name") or "").strip()
-        if raw_owner:
-            owner_clean = _CRED_RE.sub("", raw_owner).strip(" ,.-")
-            # Strip corporate suffixes (PLLC, LLC, PC, Inc, Corp, PA)
-            _CORP_RE = re.compile(
-                r'\b(PLLC|LLC|PC|P\.C\.|Inc\.?|Corp\.?|PA|P\.A\.)\b',
-                re.IGNORECASE,
-            )
-            owner_clean = _CORP_RE.sub("", owner_clean).strip(" ,.-")
-            # "Last, First" → "First Last"
-            if "," in owner_clean:
-                parts = [p.strip() for p in owner_clean.split(",", 1)]
-                owner_name = f"{parts[1]} {parts[0]}".strip() if parts[1] else parts[0]
-            else:
-                owner_name = owner_clean
-            # Guard: only treat as a personal name if:
-            # - original value had "Last, First" comma format, OR
-            # - exactly 2 words remain and none is a dental/business term
-            _BIZ_WORDS = frozenset({
-                "dental", "dentistry", "dentist", "care", "group", "center",
-                "centre", "clinic", "practice", "office", "associates",
-                "health", "wellness", "smile", "smiles", "studio", "family",
-                "general", "orthodontic", "implant", "cosmetic", "pediatric",
-            })
-            _own_words = [w for w in owner_name.split()
-                          if len(w.strip('.,')) > 1 and not re.match(r'^[A-Z]\.$', w)]
-            _has_comma_format = "," in _CRED_RE.sub("", raw_owner)
-            _no_biz_words = not any(w.lower() in _BIZ_WORDS for w in _own_words)
-            _is_person = (
-                _is_valid_doctor_name(owner_name)
-                and _no_biz_words
-                and 2 <= len(_own_words) <= 3
-                and (_has_comma_format or len(_own_words) == 2)
-            )
-            if _is_person:
-                owner_key = _normalize_name_for_dedup(owner_name)
-                already_present = any(
-                    _normalize_name_for_dedup(d.get("name", "")) == owner_key
-                    for d in doctors
-                )
-                if not already_present:
-                    doctors.insert(0, {
-                        "name":         owner_name,
-                        "specialty":    "",
-                        "associations": "",
-                    })
 
         for doc in doctors:
             rf = fills["row_alt"] if r_idx % 2 == 0 else fills["white"]
