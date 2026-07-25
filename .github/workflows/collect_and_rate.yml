@@ -206,7 +206,7 @@ jobs:
           python google_ratings_workflow.py
 
       - name: Upload Google ratings output
-        if: ${{ github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output.xlsx') != '' }}
+        if: ${{ always() && github.event.inputs.skip_ratings != 'true' && hashFiles('google_ratings_output.xlsx') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: google-ratings-batch-${{ github.event.inputs.batch }}
