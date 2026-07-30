@@ -200,6 +200,8 @@ jobs:
         env:
           CI: 'true'
           GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
         run: |
           mkdir -p artifacts
           cp input_batch_deduped.xlsx artifacts/

@@ -55,6 +55,18 @@ OUTPUT_FILE  = "google_ratings_output.xlsx"
 
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "") or _g.GOOGLE_PLACES_API_KEY
 
+# Oxylabs rotating proxy — routes Playwright through a real residential/DC IP
+# so GitHub Actions IPs don't get CAPTCHA-blocked by Google.
+_OXY_USER = os.environ.get("OXYLABS_USER", "")
+_OXY_PASS = os.environ.get("OXYLABS_PASS", "")
+_USE_PROXY = bool(_OXY_USER and _OXY_PASS)
+_PROXY_SERVER = "http://pr.oxylabs.io:7777"
+_PW_PROXY = {
+    "server":   _PROXY_SERVER,
+    "username": _OXY_USER,
+    "password": _OXY_PASS,
+} if _USE_PROXY else None
+
 # Override module-level constants so imported functions pick up CI values
 _g.GOOGLE_PLACES_API_KEY = GOOGLE_PLACES_API_KEY
 _g.DELAY_MIN  = 3.0  if IS_CI else 6.0
@@ -182,9 +194,13 @@ def launch_playwright():
     _pw = sync_playwright().__enter__()
 
     if IS_CI:
-        log.info("Launching headless Playwright (CI / GitHub Actions mode)…")
+        if _USE_PROXY:
+            log.info(f"Launching headless Playwright via Oxylabs proxy ({_PROXY_SERVER})…")
+        else:
+            log.warning("Launching headless Playwright WITHOUT proxy — Google may CAPTCHA all requests.")
         browser = _pw.chromium.launch(
             headless=True,
+            proxy=_PW_PROXY,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -200,6 +216,7 @@ def launch_playwright():
             geolocation={"latitude": 40.7128, "longitude": -74.0060},
             permissions=["geolocation"],
             user_agent=random.choice(_g._USER_AGENTS),
+            proxy=_PW_PROXY,
         )
         _g.apply_stealth(ctx)
         page = ctx.new_page()
