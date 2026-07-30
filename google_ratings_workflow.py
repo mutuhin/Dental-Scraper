@@ -38,6 +38,8 @@ from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
+import requests as _std_requests  # standard requests for SERP API calls
+
 try:
     from curl_cffi import requests as _cffi_requests
     _CFFI_OK = True
@@ -96,22 +98,19 @@ def _cffi_fetch_rating(practice_name: str, city: str, state: str,
                        address: str = "") -> tuple:
     """
     Fetch Google Search results via curl_cffi (browser TLS fingerprint) through
-    the Oxylabs proxy.  Avoids full Playwright browser overhead — a single HTTP
-    request is enough to get the knowledge-panel HTML that extract_rating() parses.
+    the Oxylabs proxy.  Avoids full Playwright browser overhead.
 
     Returns (rating, count) or ("", "") on failure.
     """
     if not _CFFI_OK or not _USE_PROXY:
         return "", ""
 
-    queries = [
-        f"{practice_name} dentist {city} {state}",
-    ]
+    queries = [f"{practice_name} dentist {city} {state}"]
     if address:
         queries.insert(0, f"{practice_name} {address} {city} {state}")
 
     for query in queries:
-        url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=us&num=5"
+        url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=us&num=5&pws=0"
         for impersonate in ("chrome120", "chrome110", "chrome107"):
             try:
                 resp = _cffi_requests.get(
@@ -121,18 +120,69 @@ def _cffi_fetch_rating(practice_name: str, city: str, state: str,
                     timeout=20,
                     headers={"Accept-Language": "en-US,en;q=0.9"},
                 )
+                log.info(f"  curl_cffi ({impersonate}): HTTP {resp.status_code}, {len(resp.text)} chars")
                 if resp.status_code != 200:
                     continue
                 html = resp.text
                 if _g._is_captcha(html):
-                    log.debug(f"  curl_cffi: CAPTCHA on {impersonate}")
+                    log.info(f"  curl_cffi: CAPTCHA/consent page detected on {impersonate}")
                     continue
                 rating, count = _g.extract_rating(html)
                 if rating:
                     return rating, count
+                log.info(f"  curl_cffi: page loaded but no knowledge panel found")
                 break  # page loaded OK but no rating — try next query
             except Exception as e:
-                log.debug(f"  curl_cffi ({impersonate}): {e}")
+                log.info(f"  curl_cffi ({impersonate}) error: {e}")
+    return "", ""
+
+
+# ── Oxylabs SERP Scraper API (dedicated Google scraping, handles CAPTCHAs) ────
+def _oxylabs_serp_rating(practice_name: str, city: str, state: str) -> tuple:
+    """
+    Use Oxylabs SERP Scraper API (realtime.oxylabs.io) to fetch a US-geolocated
+    Google Search result page.  Oxylabs handles CAPTCHAs and JS rendering
+    server-side, so the returned HTML contains the full knowledge panel.
+
+    Requires the same OXYLABS_USER / OXYLABS_PASS credentials as the proxy.
+    Returns ("", "") with a warning if the account plan doesn't include SERP API.
+    """
+    if not _USE_PROXY:
+        return "", ""
+
+    query = f"{practice_name} dentist {city} {state}"
+    try:
+        payload = {
+            "source": "google_search",
+            "query": query,
+            "geo_location": "United States",
+            "context": [{"key": "results_language", "value": "en"}],
+        }
+        resp = _std_requests.post(
+            "https://realtime.oxylabs.io/v1/queries",
+            auth=(_OXY_USER, _OXY_PASS),
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code == 403:
+            log.warning("  Oxylabs SERP API: 403 Forbidden — plan may not include SERP Scraper API")
+            return "", ""
+        if resp.status_code != 200:
+            log.info(f"  Oxylabs SERP API: HTTP {resp.status_code}")
+            return "", ""
+        results = resp.json().get("results", [])
+        if not results:
+            log.info("  Oxylabs SERP API: empty results")
+            return "", ""
+        html = results[0].get("content", "")
+        if not html:
+            log.info("  Oxylabs SERP API: no content in result")
+            return "", ""
+        log.info(f"  Oxylabs SERP API: got {len(html)} chars")
+        rating, count = _g.extract_rating(html)
+        return rating, count
+    except Exception as e:
+        log.info(f"  Oxylabs SERP API error: {e}")
     return "", ""
 
 
@@ -420,10 +470,9 @@ def run():
                 except Exception as e:
                     log.debug(f"  Places/domain error: {e}")
 
-            # ── Method 3a: curl_cffi + Oxylabs proxy (CI only, fast HTTP, no browser) ──
-            # Playwright through a proxy times out (35 s per method × 3 = nothing).
-            # curl_cffi uses a browser TLS fingerprint over a plain HTTP request,
-            # which loads in < 5 s and returns the knowledge-panel HTML we need.
+            # ── Method 3a: curl_cffi + Oxylabs proxy (CI, fast HTTP, no browser) ──
+            # Oxylabs DC IPs often get a non-knowledge-panel page — we log what
+            # we receive so failures are visible in the Actions log.
             if not rating and IS_CI and _USE_PROXY:
                 try:
                     rating, count = _cffi_fetch_rating(
@@ -432,10 +481,26 @@ def run():
                     if rating:
                         log.info(f"  ✓ curl_cffi/search: {rating} ★  ({count})")
                 except Exception as e:
-                    log.debug(f"  curl_cffi error: {e}")
+                    log.info(f"  curl_cffi error: {e}")
 
-            # ── Method 3b: Google Web Search via Playwright → knowledge panel ──
-            if not rating:
+            # ── Method 3b: Oxylabs SERP Scraper API (CI, handles CAPTCHAs) ───
+            # Uses Oxylabs' dedicated Google scraping endpoint — routes through
+            # residential IPs and renders JS server-side.  Same credentials as
+            # the proxy.  Falls back gracefully if plan doesn't include SERP API.
+            if not rating and IS_CI and _USE_PROXY:
+                try:
+                    rating, count = _oxylabs_serp_rating(
+                        p["practice"], p["city"], p["state"]
+                    )
+                    if rating:
+                        log.info(f"  ✓ Oxylabs SERP: {rating} ★  ({count})")
+                except Exception as e:
+                    log.info(f"  Oxylabs SERP error: {e}")
+
+            # ── Method 3c: Google Web Search via Playwright → knowledge panel ─
+            # In CI with Oxylabs proxy every navigation times out (35 s × 3).
+            # Skip Playwright in CI to avoid wasting 3+ min per practice.
+            if not rating and not IS_CI:
                 try:
                     rating, count = _g.search_google_by_name(
                         p["practice"], p["city"], p["state"], pw_page
@@ -446,7 +511,8 @@ def run():
                     log.debug(f"  Google/search error: {e}")
 
             # ── Method 4: Google Maps by name + address ───────────────────────
-            if not rating:
+            # Also skip in CI — Playwright + proxy = guaranteed timeout.
+            if not rating and not IS_CI:
                 try:
                     rating, count = _g.search_maps_by_name(
                         p["practice"], p["doctor"],
