@@ -301,13 +301,9 @@ def launch_playwright():
     _pw = sync_playwright().__enter__()
 
     if IS_CI:
-        if _USE_PROXY:
-            log.info(f"Launching headless Playwright via Oxylabs proxy ({_PROXY_SERVER})…")
-        else:
-            log.warning("Launching headless Playwright WITHOUT proxy — Google may CAPTCHA all requests.")
+        log.info("Launching headless Playwright (no proxy — direct GitHub Actions IP)…")
         browser = _pw.chromium.launch(
             headless=True,
-            proxy=_PW_PROXY,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -323,7 +319,6 @@ def launch_playwright():
             geolocation={"latitude": 40.7128, "longitude": -74.0060},
             permissions=["geolocation"],
             user_agent=random.choice(_g._USER_AGENTS),
-            proxy=_PW_PROXY,
         )
         _g.apply_stealth(ctx)
         page = ctx.new_page()
@@ -498,9 +493,7 @@ def run():
                     log.info(f"  Oxylabs SERP error: {e}")
 
             # ── Method 3c: Google Web Search via Playwright → knowledge panel ─
-            # In CI with Oxylabs proxy every navigation times out (35 s × 3).
-            # Skip Playwright in CI to avoid wasting 3+ min per practice.
-            if not rating and not IS_CI:
+            if not rating:
                 try:
                     rating, count = _g.search_google_by_name(
                         p["practice"], p["city"], p["state"], pw_page
@@ -511,8 +504,7 @@ def run():
                     log.debug(f"  Google/search error: {e}")
 
             # ── Method 4: Google Maps by name + address ───────────────────────
-            # Also skip in CI — Playwright + proxy = guaranteed timeout.
-            if not rating and not IS_CI:
+            if not rating:
                 try:
                     rating, count = _g.search_maps_by_name(
                         p["practice"], p["doctor"],
