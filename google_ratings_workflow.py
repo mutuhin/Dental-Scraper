@@ -38,6 +38,12 @@ from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CFFI_OK = True
+except ImportError:
+    _CFFI_OK = False
+
 # Import all extraction / search helpers from the main ratings script
 import google_ratings_v12 as _g
 
@@ -78,6 +84,57 @@ if IS_CI:
     def _ci_captcha_noop(pw_page):
         log.warning("  ⚠  CAPTCHA detected in CI — skipping (mark for manual retry)")
     _g._wait_captcha = _ci_captcha_noop
+
+# ── curl_cffi Google search (proxy-aware, no full browser needed) ─────────────
+_CFFI_PROXIES = {
+    "http":  f"http://{_OXY_USER}:{_OXY_PASS}@pr.oxylabs.io:7777",
+    "https": f"http://{_OXY_USER}:{_OXY_PASS}@pr.oxylabs.io:7777",
+} if _USE_PROXY else {}
+
+
+def _cffi_fetch_rating(practice_name: str, city: str, state: str,
+                       address: str = "") -> tuple:
+    """
+    Fetch Google Search results via curl_cffi (browser TLS fingerprint) through
+    the Oxylabs proxy.  Avoids full Playwright browser overhead — a single HTTP
+    request is enough to get the knowledge-panel HTML that extract_rating() parses.
+
+    Returns (rating, count) or ("", "") on failure.
+    """
+    if not _CFFI_OK or not _USE_PROXY:
+        return "", ""
+
+    queries = [
+        f"{practice_name} dentist {city} {state}",
+    ]
+    if address:
+        queries.insert(0, f"{practice_name} {address} {city} {state}")
+
+    for query in queries:
+        url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=us&num=5"
+        for impersonate in ("chrome120", "chrome110", "chrome107"):
+            try:
+                resp = _cffi_requests.get(
+                    url,
+                    proxies=_CFFI_PROXIES,
+                    impersonate=impersonate,
+                    timeout=20,
+                    headers={"Accept-Language": "en-US,en;q=0.9"},
+                )
+                if resp.status_code != 200:
+                    continue
+                html = resp.text
+                if _g._is_captcha(html):
+                    log.debug(f"  curl_cffi: CAPTCHA on {impersonate}")
+                    continue
+                rating, count = _g.extract_rating(html)
+                if rating:
+                    return rating, count
+                break  # page loaded OK but no rating — try next query
+            except Exception as e:
+                log.debug(f"  curl_cffi ({impersonate}): {e}")
+    return "", ""
+
 
 # ── Column indices (same as 100data.xlsx / dental_scraper output) ─────────────
 C_INDEX    = 1
@@ -363,7 +420,21 @@ def run():
                 except Exception as e:
                     log.debug(f"  Places/domain error: {e}")
 
-            # ── Method 3: Google Web Search → knowledge panel ─────────────────
+            # ── Method 3a: curl_cffi + Oxylabs proxy (CI only, fast HTTP, no browser) ──
+            # Playwright through a proxy times out (35 s per method × 3 = nothing).
+            # curl_cffi uses a browser TLS fingerprint over a plain HTTP request,
+            # which loads in < 5 s and returns the knowledge-panel HTML we need.
+            if not rating and IS_CI and _USE_PROXY:
+                try:
+                    rating, count = _cffi_fetch_rating(
+                        p["practice"], p["city"], p["state"], p.get("address", "")
+                    )
+                    if rating:
+                        log.info(f"  ✓ curl_cffi/search: {rating} ★  ({count})")
+                except Exception as e:
+                    log.debug(f"  curl_cffi error: {e}")
+
+            # ── Method 3b: Google Web Search via Playwright → knowledge panel ──
             if not rating:
                 try:
                     rating, count = _g.search_google_by_name(
