@@ -3185,8 +3185,27 @@ def yelp_search_rating(practice_name, city, state):
 
 def _parse_fb_followers(html_or_text: str) -> str:
     """Extract follower/like count from raw Facebook HTML or plain text.
-    Searches the raw content (including script tags) because Facebook
-    embeds counts in JS strings, not in the visible DOM."""
+    Searches raw content including <script> JSON blobs — Facebook embeds
+    counts in JS data structures, not always in visible DOM text."""
+    # ── 1. JSON/script-embedded numeric patterns (most reliable) ──────────────
+    for pat in (
+        r'"followers_count"\s*:\s*(\d+)',
+        r'"fan_count"\s*:\s*(\d+)',
+        r'"subscriber_count"\s*:\s*(\d+)',
+        r'"like_count"\s*:\s*(\d+)',
+        r'"page_likers"\s*:\s*\{"count"\s*:\s*(\d+)',
+        r'"likers"\s*:\s*\{"count"\s*:\s*(\d+)',
+        r'"profile_plus_follower_count"\s*:\s*(\d+)',
+        r'"connected_users_count"\s*:\s*(\d+)',
+        r'"social_context"[^}]*?"(\d+)\s*(?:people\s+)?follow',
+    ):
+        m = re.search(pat, html_or_text, re.I)
+        if m:
+            val = m.group(1)
+            if val.isdigit() and int(val) > 0:
+                return val
+
+    # ── 2. Visible text patterns (e.g. "12,345 followers", "8.2K likes") ──────
     m = re.search(r"([\d,]+(?:\.\d+)?[KMB]?)\s*(?:people\s+)?follow(?:ers?)?", html_or_text, re.I)
     if m:
         return m.group(1).replace(",", "")
@@ -3196,38 +3215,73 @@ def _parse_fb_followers(html_or_text: str) -> str:
     return ""
 
 
+_FB_LOGIN_SIGNALS = (
+    '"login"', "log in to facebook", "log into facebook",
+    "loginform", "email or phone", "you must log in",
+    '"loginRequired"', "checkpoint/block",
+)
+
+def _fb_is_login_wall(html: str) -> bool:
+    lc = html.lower()
+    return any(s in lc for s in _FB_LOGIN_SIGNALS)
+
+
+def _fb_mobile_url(url: str) -> str:
+    """Convert facebook.com URL to m.facebook.com (simpler HTML, shows counts reliably)."""
+    return re.sub(r"https?://(?:www\.)?facebook\.com", "https://m.facebook.com", url, flags=re.I)
+
+
 def _fb_cffi_get(url: str) -> str:
     """
     Fetch a facebook.com page via curl_cffi + per-call rotating Oxylabs IP.
-    Each call gets a fresh residential IP via session-id rotation.
-    Returns raw HTML or "" on failure.
+    Tries desktop URL first, then mobile URL (m.facebook.com) which has
+    simpler HTML and embeds follower counts more consistently.
+    Returns raw HTML that contains follower data, or "" on failure.
     """
     if not _CFFI_AVAILABLE:
         return ""
     import base64 as _b64
-    _headers = {
+
+    _desktop_headers = {
         "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "sec-fetch-site":  "none",
         "sec-fetch-mode":  "navigate",
         "sec-fetch-dest":  "document",
-        "Connection":      "close",   # prevent keep-alive so proxy rotates to new IP
+        "Connection":      "close",
     }
-    # Minimal browser-like cookies so FB doesn't serve a login redirect
-    _datr = _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("=")
-    _fbp  = f"fb.1.{int(time.time() * 1000)}.{random.randint(100000000, 999999999)}"
-    _cookies = {"datr": _datr, "_fbp": _fbp}
-    for _profile in ["chrome136", "chrome124", "safari260"]:
-        try:
-            _px  = _fresh_social_proxy()   # fresh IP per attempt
-            sess = cffi_requests.Session(impersonate=_profile)
-            r = sess.get(url, headers=_headers, cookies=_cookies,
-                         proxies=_px, timeout=20, allow_redirects=True)
-            if r.status_code == 200 and len(r.text) > 1000:
-                return r.text
-        except Exception as _e:
-            log.debug(f"   FB curl_cffi error ({_profile}): {_e}")
+    _mobile_headers = {
+        "User-Agent":      "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection":      "close",
+    }
+    # Minimal browser-like cookies so FB doesn't redirect to login immediately
+    def _make_cookies():
+        datr = _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("=")
+        fbp  = f"fb.1.{int(time.time() * 1000)}.{random.randint(100000000, 999999999)}"
+        return {"datr": datr, "_fbp": fbp, "locale": "en_US"}
+
+    urls_to_try = [
+        (url,                    _desktop_headers, ["chrome136", "chrome124"]),
+        (_fb_mobile_url(url),    _mobile_headers,  ["chrome136", "safari260"]),
+    ]
+
+    for _url, _headers, _profiles in urls_to_try:
+        for _profile in _profiles:
+            try:
+                _px   = _fresh_social_proxy()
+                sess  = cffi_requests.Session(impersonate=_profile)
+                r     = sess.get(_url, headers=_headers, cookies=_make_cookies(),
+                                 proxies=_px, timeout=20, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 1000:
+                    if _fb_is_login_wall(r.text):
+                        log.debug(f"   FB curl_cffi login wall on {_url}")
+                        break  # login wall — try mobile URL next
+                    return r.text
+            except Exception as _e:
+                log.debug(f"   FB curl_cffi error ({_profile}): {_e}")
     return ""
 
 
@@ -3256,19 +3310,18 @@ def get_facebook_stats_pw(url, page):
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(2000 if IS_CI else 4000)
         raw_content = page.content()
-        followers = _parse_fb_followers(raw_content) or "Blocked"   # raw HTML, not extract_text
-        try:
-            post_count = page.locator('[role="article"]').count()
-            posts = str(post_count) if post_count > 0 else "See Page"
-        except Exception:
-            posts = "See Page"
+        if _fb_is_login_wall(raw_content):
+            log.debug(f"   FB Playwright: login wall at {url}")
+            return "Not Found", "Not Found"
+        followers = _parse_fb_followers(raw_content) or "Not Found"
+        posts = "See Page"
         return posts, followers
     except PlaywrightTimeout:
         log.warning(f"  Facebook timeout: {url}")
-        return "Blocked", "Blocked"
+        return "Not Found", "Not Found"
     except Exception as e:
         log.warning(f"  Facebook Playwright error: {e}")
-        return "Blocked", "Blocked"
+        return "Not Found", "Not Found"
 
 
 def get_facebook_stats_requests(url):
@@ -3278,20 +3331,82 @@ def get_facebook_stats_requests(url):
     _social_sleep()
     html = _fb_cffi_get(url)
     if html:
-        followers = _parse_fb_followers(html)   # raw HTML
+        followers = _parse_fb_followers(html)
         if followers:
             return "See Page", followers
-    # Plain requests last resort
     r = safe_get(url)
     if not r:
-        return "Blocked", "Blocked"
-    followers = _parse_fb_followers(r.text) or "Blocked"   # raw HTML
+        return "Not Found", "Not Found"
+    if _fb_is_login_wall(r.text):
+        return "Not Found", "Not Found"
+    followers = _parse_fb_followers(r.text) or "Not Found"
     return "See Page", followers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PLAYWRIGHT — Instagram
 # ─────────────────────────────────────────────────────────────────────────────
+
+_IG_LOGIN_SIGNALS = (
+    "log in to instagram", "log into instagram", "loginform",
+    '"requiresLogin"', "create an account", "sign up for instagram",
+    "not-logged-in", "LoginAndSignupPage",
+)
+
+def _ig_is_login_wall(html: str) -> bool:
+    lc = html.lower()
+    return any(s.lower() in lc for s in _IG_LOGIN_SIGNALS)
+
+
+def _parse_ig_html(html: str) -> tuple:
+    """
+    Extract (posts, followers) from raw Instagram page HTML.
+    Tries embedded JSON blobs, meta description, and visible text — in that order.
+    Returns ("", "") if nothing found.
+    """
+    # 1) Old-style embedded JSON (still appears on some pages)
+    pm = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', html)
+    fm = re.search(r'"edge_followed_by".*?"count":(\d+)', html)
+    if pm or fm:
+        return (pm.group(1) if pm else ""), (fm.group(1) if fm else "")
+
+    # 2) Newer GraphQL JSON blob patterns
+    for p_pat, f_pat in (
+        (r'"media_count"\s*:\s*(\d+)',          r'"follower_count"\s*:\s*(\d+)'),
+        (r'"post_count"\s*:\s*(\d+)',            r'"followers"\s*:\s*(\d+)'),
+        (r'"timeline_media_count"\s*:\s*(\d+)',  r'"edge_followed_by"\s*:\s*\{[^}]*?"count"\s*:\s*(\d+)'),
+    ):
+        pm2 = re.search(p_pat, html, re.I)
+        fm2 = re.search(f_pat, html, re.I)
+        if pm2 or fm2:
+            return (pm2.group(1) if pm2 else ""), (fm2.group(1) if fm2 else "")
+
+    # 3) Meta description (e.g. "1,234 Followers, 567 Following, 89 Posts — @handle")
+    soup = BeautifulSoup(html, "lxml")
+    for attr in ({"name": "description"}, {"property": "og:description"}):
+        meta = soup.find("meta", attrs=attr)
+        if meta:
+            desc = meta.get("content", "")
+            pmd = re.search(r"([\d,]+)\s*Posts?", desc, re.I)
+            fmd = re.search(r"([\d,]+)\s*Followers?", desc, re.I)
+            if pmd or fmd:
+                return (
+                    pmd.group(1).replace(",", "") if pmd else "",
+                    fmd.group(1).replace(",", "") if fmd else "",
+                )
+
+    # 4) Visible text fallback
+    text = soup.get_text(" ", strip=True)
+    pm3 = re.search(r"([\d,]+)\s+posts?", text, re.I)
+    fm3 = re.search(r"([\d,]+)\s+followers?", text, re.I)
+    if pm3 or fm3:
+        return (
+            pm3.group(1).replace(",", "") if pm3 else "",
+            fm3.group(1).replace(",", "") if fm3 else "",
+        )
+
+    return "", ""
+
 
 def get_instagram_stats_pw(url, page):
     """
@@ -3304,39 +3419,18 @@ def get_instagram_stats_pw(url, page):
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(2000 if IS_CI else 4000)
-
         content = page.content()
-
-        # 1) Try embedded JSON data (Instagram embeds stats in JS)
-        posts_match     = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', content)
-        followers_match = re.search(r'"edge_followed_by".*?"count":(\d+)', content)
-        if posts_match and followers_match:
-            return posts_match.group(1), followers_match.group(1)
-
-        # 2) Try meta description  (e.g. "1,234 Followers, 567 Following, 89 Posts")
-        soup = BeautifulSoup(content, "lxml")
-        meta_desc = soup.find("meta", attrs={"name": "description"})
-        if meta_desc:
-            desc = meta_desc.get("content", "")
-            pm = re.search(r"([\d,]+)\s*Posts?", desc, re.IGNORECASE)
-            fm = re.search(r"([\d,]+)\s*Followers?", desc, re.IGNORECASE)
-            if pm and fm:
-                return pm.group(1).replace(",", ""), fm.group(1).replace(",", "")
-
-        # 3) Plain text search
-        text = extract_text(content)
-        pm2 = re.search(r"([\d,]+)\s+posts?", text, re.IGNORECASE)
-        fm2 = re.search(r"([\d,]+)\s+followers?", text, re.IGNORECASE)
-        posts     = pm2.group(1).replace(",", "") if pm2 else "Blocked"
-        followers = fm2.group(1).replace(",", "") if fm2 else "Blocked"
-        return posts, followers
-
+        if _ig_is_login_wall(content):
+            log.debug(f"   IG Playwright: login wall at {url}")
+            return "Not Found", "Not Found"
+        posts, followers = _parse_ig_html(content)
+        return posts or "Not Found", followers or "Not Found"
     except PlaywrightTimeout:
         log.warning(f"  Instagram timeout: {url}")
-        return "Blocked", "Blocked"
+        return "Not Found", "Not Found"
     except Exception as e:
         log.warning(f"  Instagram Playwright error: {e}")
-        return "Blocked", "Blocked"
+        return "Not Found", "Not Found"
 
 
 def get_instagram_stats_requests(url):
@@ -3346,13 +3440,11 @@ def get_instagram_stats_requests(url):
     _social_sleep()
     r = safe_get(url)
     if not r:
-        return "Blocked", "Blocked"
-    text = r.text
-    pm = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', text)
-    fm = re.search(r'"edge_followed_by".*?"count":(\d+)', text)
-    posts     = pm.group(1) if pm else "Blocked"
-    followers = fm.group(1) if fm else "Blocked"
-    return posts, followers
+        return "Not Found", "Not Found"
+    if _ig_is_login_wall(r.text):
+        return "Not Found", "Not Found"
+    posts, followers = _parse_ig_html(r.text)
+    return posts or "Not Found", followers or "Not Found"
 
 
 def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
@@ -3419,7 +3511,7 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
         except Exception as e:
             log.debug(f"  IG API error for @{username} ({_profile}): {e}")
 
-    # ── Strategy 2: profile page HTML — extract from embedded JSON ──────────────
+    # ── Strategy 2: profile page HTML — full parser ──────────────────────────────
     try:
         _px2 = _fresh_social_proxy()
         _headers2 = {
@@ -3432,21 +3524,10 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
         sess2 = cffi_requests.Session(impersonate=random.choice(_CFFI_IG_PROF))
         r2 = sess2.get(f"https://www.instagram.com/{username}/", headers=_headers2,
                        cookies=_ig_cookies(), proxies=_px2, timeout=20)
-        if r2.status_code == 200:
-            pm = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', r2.text)
-            fm = re.search(r'"edge_followed_by".*?"count":(\d+)', r2.text)
-            if pm or fm:
-                return (pm.group(1) if pm else ""), (fm.group(1) if fm else "")
-            # fallback: meta description
-            soup2 = BeautifulSoup(r2.text, "lxml")
-            meta2 = soup2.find("meta", attrs={"name": "description"})
-            if meta2:
-                desc2 = meta2.get("content", "")
-                pm2 = re.search(r"([\d,]+)\s*Posts?", desc2, re.I)
-                fm2 = re.search(r"([\d,]+)\s*Followers?", desc2, re.I)
-                if pm2 or fm2:
-                    return (pm2.group(1).replace(",", "") if pm2 else ""), \
-                           (fm2.group(1).replace(",", "") if fm2 else "")
+        if r2.status_code == 200 and not _ig_is_login_wall(r2.text):
+            posts, followers = _parse_ig_html(r2.text)
+            if posts or followers:
+                return posts, followers
     except Exception as e:
         log.debug(f"  IG profile-page error for @{username}: {e}")
 
