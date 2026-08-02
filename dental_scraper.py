@@ -1025,6 +1025,11 @@ _INVALID_NAME_WORDS = frozenset({
     "this", "that", "from", "about", "also", "only",
     "after", "before", "during", "when", "what", "where",
     "open", "closed", "hours", "call", "visit", "book", "now",
+    # verbs that appear in credential sentences — prevents "received her DDS" etc.
+    "received", "trained", "completed", "earned", "graduated", "attended",
+    "studied", "obtained", "pursued", "achieved", "performed", "practiced",
+    "accepted", "joined", "founded", "established", "served", "serving",
+    "who", "after", "upon", "then", "upon", "upon",
     # credential / course words — never a real name component
     # prevents "Specialty Certificate", "Continuing Education", etc.
     "certificate", "certification", "certificates",
@@ -1120,10 +1125,16 @@ _TEAM_LINK_TEXT = (
     "the team", "about the doctor", "our doctors",
     "about us", "about our team", "our hygienist",
     "meet your dentist", "meet our dentist", "our location",
+    "our physicians", "our practitioners", "our providers",
+    "dental team", "dental staff", "clinical team",
+    "meet our doctors", "meet the dentist", "meet dr",
+    "our associates", "our specialists",
 )
 _TEAM_HREF_KW = ("doctor", "dentist", "team", "provider", "staff", "meet-the",
                  "about-us", "about_us", "who-we-are", "our-doctor", "our-dentist",
                  "hygienist", "hygiene-team", "about",
+                 "physician", "practitioner", "clinician", "associate",
+                 "dental-team", "our-team", "meet-dr", "our-provider",
                  # location / office pages — multi-location practices list doctors there
                  "/location/", "/locations/", "/office/", "/offices/",
                  "/our-location", "/our-office", "/find-us", "/visit-us")
@@ -1749,23 +1760,32 @@ def _parse_team_page_for_doctors(soup):
         "oral", "biological", "holistic",
     })
     for tag in soup.find_all(["div", "article", "li", "section"]):
-        cls_str = " ".join(tag.get("class", []))
-        if not re.search(
-            r'\b(team|doctor|provider|dentist|staff|bio|card|person|profile|member|meet)\b',
-            cls_str, re.I,
-        ):
-            continue
         raw = tag.get_text(" ", strip=True)
-        if not (20 < len(raw) < 1200):
+        if not (20 < len(raw) < 2500):
             continue
-        # Require role text in a SHORT sub-element (title line, not bio prose)
+        # Gate 1 (primary): require a dental role keyword in a SHORT sub-element.
+        # This is the real quality filter — a card labelled "DDS" or "General Dentist"
+        # is almost certainly a doctor card, regardless of its CSS class name.
         _role_short = False
-        for rtag in tag.find_all(["p", "span", "div", "h4", "h5", "small", "em", "strong"]):
+        for rtag in tag.find_all(["p", "span", "div", "h4", "h5", "small", "em", "strong", "li"]):
             rtext = rtag.get_text(strip=True)
-            if len(rtext) <= 70 and _SEC_ROLE_RE.search(rtext):
+            if len(rtext) <= 80 and _SEC_ROLE_RE.search(rtext):
                 _role_short = True
                 break
         if not _role_short:
+            continue
+        # Gate 2 (secondary): CSS class check.
+        # If a team-related class is found → accept regardless of container size.
+        # If NOT → only accept small containers (<400 chars) to avoid scanning
+        # large page sections that happen to mention a credential somewhere.
+        cls_str = " ".join(tag.get("class", []))
+        _has_team_cls = bool(re.search(
+            r'team|doctor|physician|dentist|provider|staff|bio|card|person|'
+            r'profile|member|practitioner|clinician|associate|specialist|'
+            r'our-doc|our-dent|our-provider|dr-|meet',
+            cls_str, re.I,
+        ))
+        if not _has_team_cls and len(raw) > 400:
             continue
         # Collect candidate elements: standard heading/inline tags + leaf divs.
         # Page-builders (Divi, Elementor, custom themes) often wrap doctor names
@@ -2042,21 +2062,42 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
         w for w in re.split(r'[\W_]+', _netloc_lower) if len(w) >= 5
     } - _DOMAIN_GENERIC
 
+    _LOC_SKIP = frozenset({
+        "dr", "dds", "dmd", "md", "ms", "jr", "sr", "ii", "iii",
+        "dental", "dentist", "dentistry", "doctor",
+    })
+
     def _is_location_false_name(name: str) -> bool:
-        """Return True if the doctor name's last word looks like a location from the domain.
-        Uses substring check so 'Hartsdale' matches within 'hartsdaledentalcares.com'."""
-        words = name.split()
+        """Return True if ANY significant word in the name matches a location from the domain.
+        Checks all words (not just last), so 'Dr Rockville, MD' is caught even though
+        the last token 'MD' is too short to trigger the check."""
+        if not _netloc_lower:
+            return False
+        # Strip credentials and title prefix for analysis
+        _stripped = re.sub(r'^Dr\.?\s+', '', name, flags=re.I).strip()
+        _stripped = re.sub(
+            r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|Ph\.?D\.?).*$',
+            '', _stripped, flags=re.I,
+        ).strip()
+        words = _stripped.split()
         if not words:
             return False
-        last = words[-1].lower()
-        # Must be a meaningful length and appear as a substring in the netloc
-        if len(last) < 5 or len(words) > 3:
+        # Allow up to 4-word names (first middle last suffix)
+        if len(words) > 4:
             return False
-        # Check substring presence in the domain netloc
-        if last in _netloc_lower:
-            return True
-        # Also check against split domain parts (handles multi-word domains)
-        return last in _domain_parts
+        for w in words:
+            clean = w.strip('.,-()')
+            if len(clean) < 4:
+                continue
+            if clean.lower() in _LOC_SKIP:
+                continue
+            w_lower = clean.lower()
+            # Substring check: "rockville" in "rockvillefamilydentistry.com"
+            if w_lower in _netloc_lower:
+                return True
+            if w_lower in _domain_parts:
+                return True
+        return False
 
     # ── Pick best team soup from already-scraped pages ────────────────────────
     team_soup = None
@@ -2401,8 +2442,10 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     _assoc = _llm_assoc
 
             # Step 4 — output per-doctor result.
-            # Apply specialty_hint from card subtitle as fallback when all
-            # bio-based extraction failed to find a meaningful phrase.
+            # Apply specialty_hint from card subtitle.
+            # Run it through find_specialty first so "Orthodontist" maps to
+            # "Orthodontics" rather than being stored as raw text. Use the
+            # raw hint as a further fallback if the keyword map finds nothing.
             _spec_hint_val = sec.get("specialty_hint", "")
             _spec_hint_nav_re = re.compile(
                 r'(?:about\s+us|our\s+dent|our\s+doctor|meet\s+(?:the|our)|'
@@ -2417,14 +2460,19 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     and not re.match(r'^(?:dds|dmd|md|doctor)\s*$', _spec_hint_val, re.I)
                     and not _spec_hint_nav_re.search(_spec_hint_val)
                     and not _spec_hint_cred_re.search(_spec_hint_val)):
+                # Map through keyword map first; fall back to raw text if nothing found
+                _hint_mapped = find_specialty(_spec_hint_val)
+                if _hint_mapped == "Not Found":
+                    _hint_mapped = ""
+                _hint_best = _hint_mapped or _spec_hint_val
                 if not _specialty or _specialty == "Not Found":
-                    _specialty = _spec_hint_val
+                    _specialty = _hint_best
                 elif _specialty in (
                     "General", "Family", "Cosmetic", "Restorative",
                     "Implants", "Pediatric", "Laser", "Sedation",
                     "General Dentistry", "Family Dentistry",
-                ) and len(_spec_hint_val) > len(_specialty):
-                    _specialty = _spec_hint_val
+                ) and len(_hint_best) > len(_specialty):
+                    _specialty = _hint_best
 
             # Blank if multi-doctor site and we found nothing specific to this doctor.
             if _multi_doctor and not _specialty and not _assoc and len(bio_text) < 50:
@@ -2667,6 +2715,24 @@ def find_associations(text):
         "hispanic dental association":            "HDA",
         "national dental association":            "NDA",
         "dental organization for conscious":      "DOCS",
+        # Additional full-name patterns commonly spelled out on bio pages
+        "american board of orthodontics":         "ABO",
+        "american board of periodontology":       "ABP",
+        "american board of endodontists":         "ABE",
+        "american board of pediatric":            "ABPD",
+        "american board of prosthodontics":       "ABOP",
+        "american board of oral implantology":    "ABOI",
+        "american academy of esthetic dentistry": "AAED",
+        "american academy of restorative":        "AARD",
+        "american college of dentists":           "ACD",
+        "international college of dentists":      "ICD",
+        "fellow of the american college":         "FACD",
+        "fellow of the international college":    "FICD",
+        "fellow of the academy of general":       "FAGD",
+        "master of the academy of general":       "MAGD",
+        "fellow of the international congress":   "FICOI",
+        "academy of facial esthetics":            "AAFE",
+        "american board of dental sleep":         "ABDSM",
     }
     text_upper = text.upper()
     text_lower = text.lower()
@@ -2838,23 +2904,28 @@ def find_specialty(text):
                              "tooth implant", "all-on-4", "all on 4", "all-on-x",
                              "implant-supported", "teeth in a day", "same-day implant"]),
         ("Orthodontics",    ["orthodontist", "orthodontic", "braces specialist",
-                             "teeth straightening", "malocclusion"]),
+                             "teeth straightening", "malocclusion",
+                             "teeth alignment", "clear aligner specialist"]),
         ("Invisalign Specialist", ["invisalign specialist", "invisalign provider",
                                    "invisalign diamond", "invisalign platinum", "invisalign gold"]),
         ("Pediatric",       ["pediatric dent", "children's dent", "kids dent", "child dent",
-                             "children dent", "kids' dent", "baby teeth", "primary teeth"]),
+                             "children dent", "kids' dent", "baby teeth", "primary teeth",
+                             "pediatric dentist", "children's dentist", "kids dentist"]),
         ("Periodontics",    ["periodontist", "periodontal", "gum disease specialist",
-                             "gum specialist", "gum treatment", "gum surgery"]),
+                             "gum specialist", "gum treatment", "gum surgery",
+                             "periodontics specialist", "gum health"]),
         ("Endodontics",     ["endodontist", "root canal specialist", "root canal therapy",
-                             "endodontic specialist"]),
+                             "endodontic specialist", "endodontics"]),
         ("Oral Surgery",    ["oral surgeon", "oral surgery", "wisdom teeth removal",
                              "wisdom tooth removal", "third molar", "tooth extraction",
-                             "jaw surgery", "maxillofacial", "extractions specialist"]),
+                             "jaw surgery", "maxillofacial", "extractions specialist",
+                             "oral and maxillofacial", "omfs"]),
         ("Prosthodontics",  ["prosthodontist", "prosthodontic", "denture specialist",
-                             "crown and bridge specialist"]),
+                             "crown and bridge specialist", "prosthodontics"]),
         ("TMJ / Sleep",     ["tmj", "sleep apnea", "sleep dentistry", "snoring treatment",
                              "neuromuscular dent", "temporomandibular", "jaw pain specialist",
-                             "airway dent", "oral appliance therapy"]),
+                             "airway dent", "oral appliance therapy", "sleep medicine",
+                             "mandibular advancement"]),
         ("Laser",           ["laser dent", "laser treatment", "laser therapy",
                              "soft tissue laser", "laser whitening", "laser technology",
                              "laser procedure", "diode laser", "erbium laser",
