@@ -3287,9 +3287,11 @@ def _parse_fb_followers(html_or_text: str) -> str:
 
 
 _FB_LOGIN_SIGNALS = (
-    '"login"', "log in to facebook", "log into facebook",
+    "log in to facebook", "log into facebook",
     "loginform", "email or phone", "you must log in",
-    '"loginRequired"', "checkpoint/block",
+    '"loginrequired"', "checkpoint/block",
+    "you must be logged in", "please log in",
+    "create a new account", "forgotten password",
 )
 
 def _fb_is_login_wall(html: str) -> bool:
@@ -3301,12 +3303,16 @@ def _fb_mobile_url(url: str) -> str:
     """Convert facebook.com URL to m.facebook.com (simpler HTML, shows counts reliably)."""
     return re.sub(r"https?://(?:www\.)?facebook\.com", "https://m.facebook.com", url, flags=re.I)
 
+def _fb_mbasic_url(url: str) -> str:
+    """Convert to mbasic.facebook.com — plain-text version, no JS, best for unauthenticated access."""
+    return re.sub(r"https?://(?:www\.|m\.)?facebook\.com", "https://mbasic.facebook.com", url, flags=re.I)
+
 
 def _fb_cffi_get(url: str) -> str:
     """
     Fetch a facebook.com page via curl_cffi + per-call rotating Oxylabs IP.
-    Tries desktop URL first, then mobile URL (m.facebook.com) which has
-    simpler HTML and embeds follower counts more consistently.
+    Tries desktop → mobile (m.facebook.com) → mbasic (plain-text, no JS).
+    mbasic.facebook.com shows follower counts as visible text on unauthenticated pages.
     Returns raw HTML that contains follower data, or "" on failure.
     """
     if not _CFFI_AVAILABLE:
@@ -3328,7 +3334,13 @@ def _fb_cffi_get(url: str) -> str:
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Connection":      "close",
     }
-    # Minimal browser-like cookies so FB doesn't redirect to login immediately
+    _mbasic_headers = {
+        "User-Agent":      "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection":      "close",
+    }
+
     def _make_cookies():
         datr = _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("=")
         fbp  = f"fb.1.{int(time.time() * 1000)}.{random.randint(100000000, 999999999)}"
@@ -3337,6 +3349,7 @@ def _fb_cffi_get(url: str) -> str:
     urls_to_try = [
         (url,                    _desktop_headers, ["chrome136", "chrome124"]),
         (_fb_mobile_url(url),    _mobile_headers,  ["chrome136", "safari260"]),
+        (_fb_mbasic_url(url),    _mbasic_headers,  ["chrome136", "chrome124"]),
     ]
 
     for _url, _headers, _profiles in urls_to_try:
@@ -3345,12 +3358,14 @@ def _fb_cffi_get(url: str) -> str:
                 _px   = _fresh_social_proxy()
                 sess  = cffi_requests.Session(impersonate=_profile)
                 r     = sess.get(_url, headers=_headers, cookies=_make_cookies(),
-                                 proxies=_px, timeout=20, allow_redirects=True)
-                if r.status_code == 200 and len(r.text) > 1000:
+                                 proxies=_px, timeout=25, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 500:
                     if _fb_is_login_wall(r.text):
                         log.debug(f"   FB curl_cffi login wall on {_url}")
-                        break  # login wall — try mobile URL next
+                        break  # login wall — try next URL variant
                     return r.text
+                elif r.status_code not in (200, 302, 301):
+                    log.debug(f"   FB curl_cffi HTTP {r.status_code} on {_url}")
             except Exception as _e:
                 log.debug(f"   FB curl_cffi error ({_profile}): {_e}")
     return ""
@@ -3432,44 +3447,83 @@ def _ig_is_login_wall(html: str) -> bool:
 def _parse_ig_html(html: str) -> tuple:
     """
     Extract (posts, followers) from raw Instagram page HTML.
-    Tries embedded JSON blobs, meta description, and visible text — in that order.
+    Tries window._sharedData, embedded JSON blobs, meta description, schema.org,
+    and visible text — in that order.
     Returns ("", "") if nothing found.
     """
-    # 1) Old-style embedded JSON (still appears on some pages)
+    # 1) window._sharedData (old IG format, still appears on some cached/CDN pages)
+    m_sd = re.search(r'window\._sharedData\s*=\s*(\{.+?\});\s*</script>', html, re.S)
+    if m_sd:
+        try:
+            sd = json.loads(m_sd.group(1))
+            user = (sd.get("entry_data", {}).get("ProfilePage", [{}])[0]
+                      .get("graphql", {}).get("user", {}))
+            pm_sd = user.get("edge_owner_to_timeline_media", {}).get("count", "")
+            fm_sd = user.get("edge_followed_by", {}).get("count", "")
+            if pm_sd != "" or fm_sd != "":
+                return str(int(pm_sd)) if pm_sd != "" else "", str(int(fm_sd)) if fm_sd != "" else ""
+        except Exception:
+            pass
+
+    # 2) Old-style GraphQL embedded JSON (still appears on some pages)
     pm = re.search(r'"edge_owner_to_timeline_media".*?"count":(\d+)', html)
     fm = re.search(r'"edge_followed_by".*?"count":(\d+)', html)
     if pm or fm:
         return (pm.group(1) if pm else ""), (fm.group(1) if fm else "")
 
-    # 2) Newer GraphQL JSON blob patterns
+    # 3) Newer GraphQL JSON blob patterns
     for p_pat, f_pat in (
         (r'"media_count"\s*:\s*(\d+)',          r'"follower_count"\s*:\s*(\d+)'),
         (r'"post_count"\s*:\s*(\d+)',            r'"followers"\s*:\s*(\d+)'),
         (r'"timeline_media_count"\s*:\s*(\d+)',  r'"edge_followed_by"\s*:\s*\{[^}]*?"count"\s*:\s*(\d+)'),
+        (r'"mediaCount"\s*:\s*(\d+)',            r'"followerCount"\s*:\s*(\d+)'),
+        (r'"postsCount"\s*:\s*(\d+)',            r'"followersCount"\s*:\s*(\d+)'),
     ):
         pm2 = re.search(p_pat, html, re.I)
         fm2 = re.search(f_pat, html, re.I)
         if pm2 or fm2:
             return (pm2.group(1) if pm2 else ""), (fm2.group(1) if fm2 else "")
 
-    # 3) Meta description (e.g. "1,234 Followers, 567 Following, 89 Posts — @handle")
     soup = BeautifulSoup(html, "lxml")
+
+    # 4) Meta description (e.g. "1,234 Followers, 567 Following, 89 Posts — @handle")
     for attr in ({"name": "description"}, {"property": "og:description"}):
         meta = soup.find("meta", attrs=attr)
         if meta:
             desc = meta.get("content", "")
-            pmd = re.search(r"([\d,]+)\s*Posts?", desc, re.I)
-            fmd = re.search(r"([\d,]+)\s*Followers?", desc, re.I)
+            pmd = re.search(r"([\d,.]+[KMBkmb]?)\s*Posts?", desc, re.I)
+            fmd = re.search(r"([\d,.]+[KMBkmb]?)\s*Followers?", desc, re.I)
             if pmd or fmd:
                 return (
                     pmd.group(1).replace(",", "") if pmd else "",
                     fmd.group(1).replace(",", "") if fmd else "",
                 )
 
-    # 4) Visible text fallback
+    # 5) Schema.org JSON-LD (sometimes present on IG pages)
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            ld = json.loads(script.string or "")
+            ic = ld.get("interactionStatistic", [])
+            if isinstance(ic, dict):
+                ic = [ic]
+            posts_ld = ""
+            follow_ld = ""
+            for stat in ic:
+                itype = stat.get("interactionType", "")
+                val   = str(stat.get("userInteractionCount", ""))
+                if "WriteAction" in itype or "Post" in itype:
+                    posts_ld = val
+                elif "Follow" in itype:
+                    follow_ld = val
+            if posts_ld or follow_ld:
+                return posts_ld, follow_ld
+        except Exception:
+            pass
+
+    # 6) Visible text fallback
     text = soup.get_text(" ", strip=True)
-    pm3 = re.search(r"([\d,]+)\s+posts?", text, re.I)
-    fm3 = re.search(r"([\d,]+)\s+followers?", text, re.I)
+    pm3 = re.search(r"([\d,.]+[KMBkmb]?)\s+posts?", text, re.I)
+    fm3 = re.search(r"([\d,.]+[KMBkmb]?)\s+followers?", text, re.I)
     if pm3 or fm3:
         return (
             pm3.group(1).replace(",", "") if pm3 else "",
@@ -3520,8 +3574,10 @@ def get_instagram_stats_requests(url):
 
 def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
     """
-    Fetch Instagram posts + followers via the internal web API.
-    Uses curl_cffi TLS impersonation + Oxylabs proxy to avoid IP rate-limits.
+    Fetch Instagram posts + followers via curl_cffi TLS impersonation + Oxylabs proxy.
+    Strategy order:
+      1. Profile page HTML (curl_cffi) — parse _sharedData / GraphQL JSON / meta desc
+      2. web_profile_info internal API (JSON) — often 401 now but worth trying
     Returns (posts, followers) or ("", "") on failure.
     """
     if not ig_url or not _CFFI_AVAILABLE:
@@ -3539,7 +3595,6 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
     import base64 as _b64, uuid as _uuid
     _ua = random.choice(_SOCIAL_UA_LIST)
 
-    # Build session-looking cookies that Instagram requires (values don't need to be real)
     def _ig_cookies():
         return {
             "csrftoken": "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", k=32)),
@@ -3548,9 +3603,38 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
             "datr":      _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("="),
         }
 
-    # ── Strategy 1: web_profile_info API (JSON) ────────────────────────────────
+    # ── Strategy 1: profile page HTML ────────────────────────────────────────────
+    _html_headers = {
+        "User-Agent":       _ua,
+        "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language":  "en-US,en;q=0.9",
+        "Referer":          "https://www.instagram.com/",
+        "sec-fetch-site":   "none",
+        "sec-fetch-mode":   "navigate",
+        "sec-fetch-dest":   "document",
+        "Connection":       "close",
+    }
+    for _profile in random.sample(_CFFI_IG_PROF, len(_CFFI_IG_PROF)):
+        try:
+            _px  = _fresh_social_proxy()
+            sess = cffi_requests.Session(impersonate=_profile)
+            r = sess.get(f"https://www.instagram.com/{username}/", headers=_html_headers,
+                         cookies=_ig_cookies(), proxies=_px, timeout=25, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 1000:
+                if _ig_is_login_wall(r.text):
+                    log.debug(f"  IG HTML login wall for @{username} ({_profile})")
+                    continue
+                posts, followers = _parse_ig_html(r.text)
+                if posts or followers:
+                    log.info(f"  IG HTML hit → {posts} posts, {followers} followers for @{username}")
+                    return posts, followers
+            log.debug(f"  IG HTML status {r.status_code} for @{username} ({_profile})")
+        except Exception as e:
+            log.debug(f"  IG HTML error for @{username} ({_profile}): {e}")
+
+    # ── Strategy 2: web_profile_info internal API (JSON) ─────────────────────────
     api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    headers = {
+    api_headers = {
         "x-ig-app-id":      "936619743392459",
         "User-Agent":       _ua,
         "Accept":           "*/*",
@@ -3564,9 +3648,9 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
     }
     for _profile in random.sample(_CFFI_IG_PROF, len(_CFFI_IG_PROF)):
         try:
-            _px  = _fresh_social_proxy()   # fresh residential IP per attempt
+            _px  = _fresh_social_proxy()
             sess = cffi_requests.Session(impersonate=_profile)
-            r = sess.get(api_url, headers=headers, cookies=_ig_cookies(),
+            r = sess.get(api_url, headers=api_headers, cookies=_ig_cookies(),
                          proxies=_px, timeout=20)
             if r.status_code == 200:
                 data = r.json()
@@ -3582,33 +3666,14 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
         except Exception as e:
             log.debug(f"  IG API error for @{username} ({_profile}): {e}")
 
-    # ── Strategy 2: profile page HTML — full parser ──────────────────────────────
-    try:
-        _px2 = _fresh_social_proxy()
-        _headers2 = {
-            "User-Agent":      _ua,
-            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer":         "https://www.instagram.com/",
-            "Connection":      "close",
-        }
-        sess2 = cffi_requests.Session(impersonate=random.choice(_CFFI_IG_PROF))
-        r2 = sess2.get(f"https://www.instagram.com/{username}/", headers=_headers2,
-                       cookies=_ig_cookies(), proxies=_px2, timeout=20)
-        if r2.status_code == 200 and not _ig_is_login_wall(r2.text):
-            posts, followers = _parse_ig_html(r2.text)
-            if posts or followers:
-                return posts, followers
-    except Exception as e:
-        log.debug(f"  IG profile-page error for @{username}: {e}")
-
     return "", ""
 
 
 def get_tiktok_stats(tt_url: str) -> tuple[str, str]:
     """
     Fetch TikTok video count + follower count via curl_cffi.
-    Parses the __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON embedded in the page.
+    Uses rotating residential proxy (not datacenter — TikTok blocks datacenter IPs).
+    Parses __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON + multiple regex fallbacks.
     Returns (videos, followers) or ("", "") on failure.
     """
     if not tt_url or not _CFFI_AVAILABLE:
@@ -3628,40 +3693,75 @@ def get_tiktok_stats(tt_url: str) -> tuple[str, str]:
         "Accept-Language": "en-US,en;q=0.9",
         "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
         "Referer":         "https://www.tiktok.com/",
+        "sec-fetch-site":  "none",
+        "sec-fetch-mode":  "navigate",
+        "sec-fetch-dest":  "document",
     }
-    _px = {"http": _BYPASS_PROXY, "https": _BYPASS_PROXY} if _BYPASS_PROXY else None
-    for profile in random.sample(_CFFI_PROFILES, len(_CFFI_PROFILES)):
-        try:
-            sess = cffi_requests.Session(impersonate=profile)
-            r = sess.get(url, headers=headers, proxies=_px, timeout=20, allow_redirects=True)
-            if r.status_code != 200:
-                continue
-            html = r.text
-            # Method 1: embedded JSON
-            m = re.search(
-                r'id=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',
-                html, re.S
-            )
-            if m:
-                try:
-                    data  = json.loads(m.group(1))
-                    stats = data["__DEFAULT_SCOPE__"]["webapp.user-detail"]["userInfo"].get("stats", {})
+
+    def _try_parse_tiktok(html: str) -> tuple:
+        # Method 1: __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON blob
+        m = re.search(
+            r'id=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',
+            html, re.S
+        )
+        if m:
+            try:
+                data  = json.loads(m.group(1))
+                stats = data["__DEFAULT_SCOPE__"]["webapp.user-detail"]["userInfo"].get("stats", {})
+                followers = str(int(stats["followerCount"])) if "followerCount" in stats else ""
+                videos    = str(int(stats["videoCount"]))    if "videoCount"    in stats else ""
+                if followers or videos:
+                    return videos, followers
+            except Exception:
+                pass
+
+        # Method 2: SIGI_STATE JSON blob (newer TikTok pages)
+        m2 = re.search(r'id=["\']SIGI_STATE["\'][^>]*>(.*?)</script>', html, re.S)
+        if m2:
+            try:
+                data2 = json.loads(m2.group(1))
+                users = data2.get("UserPage", {}).get("uniqueId", {})
+                if not users:
+                    users = data2.get("UserModule", {}).get("users", {})
+                if users:
+                    udata = next(iter(users.values()), {})
+                    stats = udata.get("stats", {})
                     followers = str(int(stats["followerCount"])) if "followerCount" in stats else ""
                     videos    = str(int(stats["videoCount"]))    if "videoCount"    in stats else ""
                     if followers or videos:
                         return videos, followers
-                except Exception:
-                    pass
-            # Method 2: raw regex fallback
-            mf = re.search(r'"followerCount"\s*:\s*(\d+)', html)
-            mv = re.search(r'"videoCount"\s*:\s*(\d+)', html)
-            followers = mf.group(1) if mf else ""
-            videos    = mv.group(1) if mv else ""
-            if followers or videos:
-                return videos, followers
-        except Exception as e:
-            log.debug(f"  TikTok error ({profile}): {e}")
-        time.sleep(0.5)
+            except Exception:
+                pass
+
+        # Method 3: raw regex fallback — covers any JSON structure
+        mf = re.search(r'"followerCount"\s*:\s*(\d+)', html)
+        mv = re.search(r'"videoCount"\s*:\s*(\d+)', html)
+        followers = mf.group(1) if mf else ""
+        videos    = mv.group(1) if mv else ""
+        if followers or videos:
+            return videos, followers
+
+        return "", ""
+
+    # Try with rotating residential proxy first, then without proxy
+    proxy_options = [_fresh_social_proxy(), None]
+    for _px in proxy_options:
+        for profile in random.sample(_CFFI_PROFILES, min(3, len(_CFFI_PROFILES))):
+            try:
+                sess = cffi_requests.Session(impersonate=profile)
+                r = sess.get(url, headers=headers, proxies=_px, timeout=25, allow_redirects=True)
+                if r.status_code != 200:
+                    log.debug(f"  TikTok HTTP {r.status_code} for @{username} ({profile})")
+                    continue
+                videos, followers = _try_parse_tiktok(r.text)
+                if videos or followers:
+                    log.info(f"  TikTok hit → {videos} videos, {followers} followers for @{username}")
+                    return videos, followers
+                log.debug(f"  TikTok: no stats found in page for @{username} ({profile})")
+            except Exception as e:
+                log.debug(f"  TikTok error ({profile}): {e}")
+            time.sleep(0.5)
+
     return "", ""
 
 
