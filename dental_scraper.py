@@ -211,6 +211,9 @@ def _fresh_social_proxy() -> "dict | None":
 SERVICE_KEYWORDS = {
     # ── Invisalign ────────────────────────────────────────────────────────────
     "invisalign":            "Invisalign",
+    "clincheck":             "Invisalign",   # Invisalign case-planning software
+    "smarttrack":            "Invisalign",   # Invisalign aligner material
+    "align technology":      "Invisalign",   # Invisalign parent company
 
     # ── Clear Aligners ────────────────────────────────────────────────────────
     "clear aligner":         "Clear Aligners",
@@ -230,6 +233,9 @@ SERVICE_KEYWORDS = {
     "angelalign":            "Clear Aligners",
     "3m clarity":            "Clear Aligners",
     "ormco aligner":         "Clear Aligners",
+    "damon clear":           "Clear Aligners",
+    "lightforce":            "Clear Aligners",
+    "arc aligner":           "Clear Aligners",
 
     # ── Veneers ───────────────────────────────────────────────────────────────
     "veneers":               "Veneers",
@@ -240,9 +246,43 @@ SERVICE_KEYWORDS = {
     "dental laminate":       "Veneers",
     "dental laminates":      "Veneers",
     "tooth laminates":       "Veneers",
+    "snap-on smile":         "Veneers",
+    "snap on smile":         "Veneers",
+    "no-prep veneer":        "Veneers",
+    "no prep veneer":        "Veneers",
+    "prepless veneer":       "Veneers",
+    "prep-less veneer":      "Veneers",
+    "hollywood smile":       "Veneers",
+    "emax veneer":           "Veneers",
+    "e.max veneer":          "Veneers",
+    "da vinci veneer":       "Veneers",
 
     # ── Implants ──────────────────────────────────────────────────────────────
     "implant":               "Implants",
+    "all-on-4":              "Implants",
+    "all on 4":              "Implants",
+    "all-on-6":              "Implants",
+    "all on 6":              "Implants",
+    "all-on-8":              "Implants",
+    "all on 8":              "Implants",
+    "all-on-x":              "Implants",
+    "all on x":              "Implants",
+    "teeth in a day":        "Implants",
+    "teeth in one day":      "Implants",
+    "same-day implant":      "Implants",
+    "same day implant":      "Implants",
+    "mini implant":          "Implants",
+    "mini-implant":          "Implants",
+    "snap-on denture":       "Implants",
+    "snap on denture":       "Implants",
+    "implant-retained":      "Implants",
+    "implant retained":      "Implants",
+    "implant-supported":     "Implants",
+    "implant supported":     "Implants",
+    "full arch":             "Implants",
+    "full-arch":             "Implants",
+    "immediate load":        "Implants",
+    "overdenture":           "Implants",
 
     # ── Smile Makeovers ───────────────────────────────────────────────────────
     "smile makeover":        "Smile Makeovers",
@@ -256,6 +296,14 @@ SERVICE_KEYWORDS = {
     "smile enhancement":     "Smile Makeovers",
     "cosmetic makeover":     "Smile Makeovers",
     "aesthetic dentistry":   "Smile Makeovers",
+    "smile rejuvenation":    "Smile Makeovers",
+    "smile rejuv":           "Smile Makeovers",
+    "full mouth rehabilitation": "Smile Makeovers",
+    "full mouth reconstruction": "Smile Makeovers",
+    "complete oral rehabilitation": "Smile Makeovers",
+    "complete smile makeover": "Smile Makeovers",
+    "dream smile":           "Smile Makeovers",
+    "perfect smile":         "Smile Makeovers",
 
     # ── Teeth Whitening ───────────────────────────────────────────────────────
     "whitening":             "Teeth Whitening",
@@ -271,22 +319,47 @@ SERVICE_KEYWORDS = {
     "pola whitening":        "Teeth Whitening",
     "nusmile":               "Teeth Whitening",
     "teeth brightening":     "Teeth Whitening",
+    "tooth whitening":       "Teeth Whitening",
+    "dental bleaching":      "Teeth Whitening",
+    "at-home whitening":     "Teeth Whitening",
+    "at home whitening":     "Teeth Whitening",
+    "take-home whitening":   "Teeth Whitening",
+    "take home whitening":   "Teeth Whitening",
+    "in-office whitening":   "Teeth Whitening",
+    "in office whitening":   "Teeth Whitening",
+    "chairside whitening":   "Teeth Whitening",
+    "whitening tray":        "Teeth Whitening",
+    "custom tray whitening": "Teeth Whitening",
+    "sinsational smile":     "Teeth Whitening",
+    "beyond whitening":      "Teeth Whitening",
+    "power whitening":       "Teeth Whitening",
 
     # ── Sedation Dentistry ────────────────────────────────────────────────────
     "sedation":              "Sedation Dentistry",
     "sleep dentistry":       "Sedation Dentistry",
     "nitrous oxide":         "Sedation Dentistry",
+    "nitrous":               "Sedation Dentistry",
     "laughing gas":          "Sedation Dentistry",
     "iv sedation":           "Sedation Dentistry",
     "oral conscious":        "Sedation Dentistry",
     "conscious sedation":    "Sedation Dentistry",
+    "oral sedation":         "Sedation Dentistry",
+    "oral sedative":         "Sedation Dentistry",
     "general anesthesia":    "Sedation Dentistry",
     "twilight sedation":     "Sedation Dentistry",
     "minimal sedation":      "Sedation Dentistry",
     "moderate sedation":     "Sedation Dentistry",
+    "deep sedation":         "Sedation Dentistry",
     "dental anxiety":        "Sedation Dentistry",
     "relaxation dentistry":  "Sedation Dentistry",
     "comfort dentistry":     "Sedation Dentistry",
+    "halcion":               "Sedation Dentistry",
+    "triazolam":             "Sedation Dentistry",
+    "anxiolysis":            "Sedation Dentistry",
+    "anxiety-free":          "Sedation Dentistry",
+    "anxiety free dentist":  "Sedation Dentistry",
+    "fear-free":             "Sedation Dentistry",
+    "fear free dentist":     "Sedation Dentistry",
 
     # ── Holistic Dentistry ────────────────────────────────────────────────────
     "holistic":              "Holistic Dentistry",
@@ -297,8 +370,11 @@ SERVICE_KEYWORDS = {
     "fluoride-free":         "Holistic Dentistry",
     "biocompatible":         "Holistic Dentistry",
     "ozone therapy":         "Holistic Dentistry",
+    "ozone dentistry":       "Holistic Dentistry",
+    "ozone treatment":       "Holistic Dentistry",
     "zirconia implant":      "Holistic Dentistry",
     "metal-free":            "Holistic Dentistry",
+    "metal free":            "Holistic Dentistry",
     "smart protocol":        "Holistic Dentistry",
     "naturopathic dent":     "Holistic Dentistry",
     "non-toxic dentist":     "Holistic Dentistry",
@@ -306,6 +382,16 @@ SERVICE_KEYWORDS = {
     "ceramic implant":       "Holistic Dentistry",
     "zurich protocol":       "Holistic Dentistry",
     "natural dentistry":     "Holistic Dentistry",
+    "biomimetic":            "Holistic Dentistry",
+    "environmental dentistry": "Holistic Dentistry",
+    "biodentistry":          "Holistic Dentistry",
+    "non-amalgam":           "Holistic Dentistry",
+    "non amalgam":           "Holistic Dentistry",
+    "amalgam-free":          "Holistic Dentistry",
+    "amalgam free":          "Holistic Dentistry",
+    "bpa-free":              "Holistic Dentistry",
+    "bpa free":              "Holistic Dentistry",
+    "integrative dent":      "Holistic Dentistry",
 
     # ── Cancer Screening ──────────────────────────────────────────────────────
     "cancer screening":      "Cancer Screening",
@@ -318,8 +404,15 @@ SERVICE_KEYWORDS = {
     "fluorescence screening":"Cancer Screening",
     "early detection oral":  "Cancer Screening",
     "tissue staining":       "Cancer Screening",
+    "tissue fluorescence":   "Cancer Screening",
+    "brush biopsy":          "Cancer Screening",
+    "oral lesion":           "Cancer Screening",
+    "mucosal screening":     "Cancer Screening",
+    "tolight":               "Cancer Screening",
+    "orascoptic":            "Cancer Screening",
+    "fluorescence visuali":  "Cancer Screening",
 
-    # ── Dental Plan (Membership) — only specific plan phrases, no generic terms
+    # ── Dental Plan (Membership) ──────────────────────────────────────────────
     "membership plan":       "Dental Plan",
     "dental membership":     "Dental Plan",
     "annual membership":     "Dental Plan",
@@ -338,8 +431,16 @@ SERVICE_KEYWORDS = {
     "monthly dental plan":   "Dental Plan",
     "annual dental plan":    "Dental Plan",
     "wellness membership":   "Dental Plan",
+    "care membership":       "Dental Plan",
+    "preventive membership": "Dental Plan",
+    "savings club":          "Dental Plan",
+    "dental plan":           "Dental Plan",
+    "without insurance":     "Dental Plan",
+    "no insurance needed":   "Dental Plan",
+    "uninsured plan":        "Dental Plan",
+    "affordable plan":       "Dental Plan",
     # removed: "savings plan", "discount plan", "wellness plan", "care plan",
-    # "no insurance", "without insurance", "preventive plan" — too generic
+    # "no insurance", "preventive plan" — too generic
 }
 
 TECH_KEYWORDS = {
@@ -358,6 +459,7 @@ TECH_KEYWORDS = {
     "chairside crown":           "CEREC",
     "chairside milling":         "CEREC",
     "in-office milling":         "CEREC",
+    "milling unit":              "CEREC",
     "milled crown":              "CEREC",
     "cad/cam crown":             "CEREC",
     "cadcam crown":              "CEREC",
@@ -375,14 +477,18 @@ TECH_KEYWORDS = {
     "same day dentistry":        "CEREC",
     "e4d":                       "CEREC",
     "omnicam":                   "CEREC",
-    # primescan is the CEREC scanner — listed under Intraoral Scanners too
-    # but milling/same-day crown context is the distinguisher; keep here
     "cerec primescan":           "CEREC",
     "cerec omnicam":             "CEREC",
     "cerec mc":                  "CEREC",
     "cerec ac":                  "CEREC",
+    "one day crown":             "CEREC",
+    "one-day crown":             "CEREC",
+    "single day crown":          "CEREC",
+    "crown while you wait":      "CEREC",
+    "in-house crown":            "CEREC",
+    "in house crown":            "CEREC",
+    "1 day crown":               "CEREC",
     # General crown service phrases — websites list "Dental Crowns" as a service
-    # without always naming the brand; map to CEREC since column = Same Day Crowns
     "crowns":                    "CEREC",
     "dental crowns":             "CEREC",
     "dental crown":              "CEREC",
@@ -424,12 +530,18 @@ TECH_KEYWORDS = {
     "digital tomography":        "CBCT",
     "i-cat":                     "CBCT",
     "dental ct":                 "CBCT",
-    # planmeca removed (too generic — makes 2D X-rays and intraoral scanners too)
-    # use only CBCT-specific Planmeca model names:
+    "three-dimensional imaging": "CBCT",
+    "three dimensional imaging": "CBCT",
+    "3-dimensional imaging":     "CBCT",
+    "3d panoramic":              "CBCT",
+    "3d panorex":                "CBCT",
+    "volumetric imaging":        "CBCT",
+    "j morita":                  "CBCT",   # without period variant
     "planmeca promax 3d":        "CBCT",
     "planmeca cbct":             "CBCT",
     "vatech cbct":               "CBCT",
     "vatech green":              "CBCT",
+    "vatech pax":                "CBCT",
     "kavo cbct":                 "CBCT",
     "acteon cbct":               "CBCT",
     "galileos":                  "CBCT",
@@ -449,6 +561,7 @@ TECH_KEYWORDS = {
     "waterlase":                 "Lasers",
     "biolase":                   "Lasers",
     "solea laser":               "Lasers",
+    "solea":                     "Lasers",
     "diode laser":               "Lasers",
     "erbium laser":              "Lasers",
     "fotona":                    "Lasers",
@@ -461,14 +574,23 @@ TECH_KEYWORDS = {
     "epic x laser":              "Lasers",
     "soft tissue laser":         "Lasers",
     "hard tissue laser":         "Lasers",
+    "all-tissue laser":          "Lasers",
+    "all tissue laser":          "Lasers",
     "lanap":                     "Lasers",
+    "lpsdt":                     "Lasers",   # Laser Periodontal Therapy variant
     "lightscalpel":              "Lasers",
+    "sirolaser":                 "Lasers",
     "periodontal laser":         "Lasers",
     "gum laser":                 "Lasers",
     "laser gum":                 "Lasers",
     "laser periodon":            "Lasers",
     "laser whitening":           "Lasers",
     "laser surgery":             "Lasers",
+    "laser frenectomy":          "Lasers",
+    "laser crown lengthening":   "Lasers",
+    "nightlase":                 "Lasers",   # Fotona sleep/snoring laser
+    "smoothlase":                "Lasers",   # Fotona soft tissue laser
+    "laser bacteria":            "Lasers",   # LLLT / photobiomodulation
 
     # ── AI ────────────────────────────────────────────────────────────────────
     # " ai " (space-bounded) kept but supplemented with regex check below
@@ -496,6 +618,19 @@ TECH_KEYWORDS = {
     "machine learning":          "AI",
     "dexis clarity":             "AI",
     "apteryx ai":                "AI",
+    "ai radiograph":             "AI",
+    "ai x-ray":                  "AI",
+    "ai xray":                   "AI",
+    "automated caries":          "AI",
+    "ai caries":                 "AI",
+    "cavity detection software": "AI",
+    "ai pathology":              "AI",
+    "radiology ai":              "AI",
+    "second opinion ai":         "AI",
+    "probity dental":            "AI",
+    "dentalxrai":                "AI",
+    "praxis ai":                 "AI",
+    "neural network":            "AI",   # common in AI marketing copy
 
     # ── Intraoral Scanners ────────────────────────────────────────────────────
     "intraoral scanner":         "Intraoral Scanners",
@@ -513,21 +648,33 @@ TECH_KEYWORDS = {
     "digital intraoral":         "Intraoral Scanners",
     "3d intraoral":              "Intraoral Scanners",
     "digital dental scan":       "Intraoral Scanners",
+    "chairside scan":            "Intraoral Scanners",
+    "intraoral scan":            "Intraoral Scanners",
     "trios":                     "Intraoral Scanners",
     "medit":                     "Intraoral Scanners",
     "itero":                     "Intraoral Scanners",
     "itero element":             "Intraoral Scanners",
+    "itero lumina":              "Intraoral Scanners",
     "3shape":                    "Intraoral Scanners",
     "trios scanner":             "Intraoral Scanners",
+    "trios 3":                   "Intraoral Scanners",
+    "trios 4":                   "Intraoral Scanners",
+    "trios 5":                   "Intraoral Scanners",
     "medit scanner":             "Intraoral Scanners",
     "medit i-500":               "Intraoral Scanners",
     "medit i500":                "Intraoral Scanners",
+    "medit i-700":               "Intraoral Scanners",
+    "medit i700":                "Intraoral Scanners",
+    "medit i-900":               "Intraoral Scanners",
+    "medit i900":                "Intraoral Scanners",
     "primescan":                 "Intraoral Scanners",
+    "virtuo vivo":               "Intraoral Scanners",   # Straumann scanner
     "true definition scanner":   "Intraoral Scanners",
     "3m true definition":        "Intraoral Scanners",
     "planmeca emerald":          "Intraoral Scanners",
     "carestream cs 3600":        "Intraoral Scanners",
     "carestream cs3600":         "Intraoral Scanners",
+    "cerec scanner":             "Intraoral Scanners",
     # removed: "digital scan" (too broad), "planmeca scanner" (now specific models),
     # "dental scanner" (too vague), "carestream dental" (too broad)
 }
@@ -2510,52 +2657,72 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
 def find_locations_count(text, soup):
     """
     Detect number of practice locations.
-    Looks for explicit 'X locations' or 'X offices' language, or counts
-    distinct address blocks on contact/about pages.
-    Uses \\d{1,2} (1-2 digit numbers only) to avoid matching 4-digit street
-    numbers like "4747" that appear before words like "office" in addresses.
+    Looks for explicit 'X locations' or 'X offices' language (numeric or written-out),
+    or counts distinct address blocks on contact/about pages.
     """
-    # Only match 1-2 digit numbers (real multi-location counts are < 30).
-    # This prevents "4747 Oak St offices" address fragments matching.
+    tl = text.lower()
+
+    # Numeric: "3 locations", "2 offices", "4 convenient clinics" (1-2 digits only)
     explicit = re.search(
-        r"\b(\d{1,2})\s+(?:convenient\s+)?(?:locations?|offices?|clinics?)\b",
+        r"\b(\d{1,2})\s+(?:convenient\s+)?(?:locations?|offices?|clinics?|sites?)\b",
         text,
         re.IGNORECASE,
     )
     if explicit:
         n = int(explicit.group(1))
-        # Validate plausible range: 2-25 locations
         if 2 <= n <= 25:
             return str(n)
         elif n == 1:
             return "1"
 
+    # Written-out numbers — "two locations", "three offices", etc.
+    _NUM_WORDS = {
+        "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    m_word = re.search(
+        r'\b(two|three|four|five|six|seven|eight|nine|ten)\s+'
+        r'(?:convenient\s+)?(?:locations?|offices?|clinics?|sites?)\b',
+        tl,
+    )
+    if m_word:
+        return str(_NUM_WORDS.get(m_word.group(1), "Multiple"))
+
     multi_phrases = [
-        "multiple locations", "multiple offices", "two locations",
-        "three locations", "four locations", "five locations",
+        "multiple locations", "multiple offices", "multiple clinics",
+        "two locations", "three locations", "four locations", "five locations",
+        "six locations", "seven locations",
         "all locations", "all offices", "our locations",
-        "find a location", "find our offices",
-        "2 convenient", "3 convenient", "visit us at either",
-        "both of our", "all of our locations",
+        "find a location", "find our offices", "locate an office",
+        "2 convenient", "3 convenient", "4 convenient", "5 convenient",
+        "visit us at either", "both of our", "all of our locations",
+        "serving multiple", "several locations", "many locations",
+        "locations near you", "offices near you",
+        "choose your location", "select your location",
     ]
     for phrase in multi_phrases:
-        if phrase in text.lower():
+        if phrase in tl:
             return "Multiple"
 
-    # Count distinct full address blocks (street + city pattern).
-    # Used to detect multi-location pages like /locations or /contact.
+    # Count distinct full address blocks (street + city + state + ZIP)
     _addr_re = re.compile(
-        r'\b\d{2,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}'   # street number + name
-        r'\s*,\s*[A-Z][a-zA-Z\s]+,\s*[A-Z]{2}\s+\d{5}',      # city, ST ZIP
+        r'\b\d{2,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}'
+        r'\s*,\s*[A-Z][a-zA-Z\s]+,\s*[A-Z]{2}\s+\d{5}',
         re.MULTILINE,
     )
     addr_blocks = _addr_re.findall(text)
     if len(addr_blocks) >= 2:
         return str(len(addr_blocks))
 
-    # Check for a nav item or link labelled "Locations"
-    if soup.find("a", string=re.compile(r"^locations?$", re.I)):
+    # Nav link labelled "Locations" or "Our Offices"
+    if soup.find("a", string=re.compile(r"^(locations?|our\s+offices?|find\s+us)$", re.I)):
         return "Multiple"
+
+    # Dedicated locations page linked in nav (e.g. /locations, /offices, /our-offices)
+    for a in soup.find_all("a", href=True):
+        href_l = a["href"].lower()
+        if re.search(r"/(locations?|offices?|our-offices?|find-us|clinics?)/?$", href_l):
+            return "Multiple"
 
     return "1"
 
@@ -4401,10 +4568,16 @@ def scrape_practice(row, pw_page=None):
             _TEST_CLASS_RE = re.compile(
                 r"(testimonial|review|quote|patient.story|patient.review|"
                 r"feedback|client.say|what.people|slider.item|carousel.item|"
-                r"swiper.slide|slick.slide|rating.block|star.review)", re.I
+                r"swiper.slide|slick.slide|rating.block|star.review|"
+                r"birdeye|podium|grade\.us|demandforce|solutionreach|"
+                r"reviewwave|revdoc|intiveo|weave.review|patientpop.review|"
+                r"google.review|review.card|review.item|review.widget|"
+                r"star.rating|patient.voice|verified.review|happy.patient|"
+                r"five.star|5.star|4.star|success.story|what.our.patients|"
+                r"words.from|said.about|hear.from|raving|rave)", re.I
             )
             _TEST_ATTR_RE  = re.compile(
-                r"(testimonial|review|quote|patient)", re.I
+                r"(testimonial|review|quote|patient|birdeye|podium|rating|star)", re.I
             )
             for _tsp in [all_soup] + [sp for _, sp in all_scraped_soups]:
                 for _blk in _tsp.find_all(
@@ -4461,19 +4634,29 @@ def scrape_practice(row, pw_page=None):
             except Exception as e:
                 log.debug(f"   Playwright homepage pass failed: {e}")
 
-        # ── e2) Playwright render of service/treatment sub-pages (JS-rendered sites) ─
-        # Only fires when static scraping found few/no services (implies JS-rendered).
-        # Cap at 2 pages in CI to keep per-practice time bounded.
-        _svc_pw_cap = 4 if IS_CI else 10
-        _svc_already = sum(1 for k in ("invisalign","clear_aligners","veneers","implants",
-                                        "smile_makeovers","whitening","sedation","holistic",
-                                        "cancer_screening") if result.get(k))
-        if pw_page and all_soup and base_url and _svc_already < 2:
+        # ── e2) Playwright render of service/technology sub-pages ─────────────
+        # Always fires when pw_page is available — static scraping misses JS-rendered
+        # content. Searches ALL scraped soups (not just homepage) for service links.
+        # Capped at _svc_pw_cap to keep per-practice time bounded.
+        _svc_pw_cap = 6 if IS_CI else 12
+        _SVC_HREF_KW = (
+            "service", "treatment", "procedure", "cosmetic", "technology",
+            "laser", "implant", "whitening", "sedation", "holistic",
+            "aligner", "invisalign", "cerec", "cbct", "intraoral",
+            "cancer", "oral-cancer", "membership", "dental-plan",
+            "restore", "restorative", "general-dentistry", "family-dentistry",
+            "preventive", "prevention", "patient-care", "our-care",
+        )
+        if pw_page and all_soup and base_url:
             _svc_pw_urls = []
             _seen_svc = set(sub_pages_found) if 'sub_pages_found' in dir() else set()
-            for _a in all_soup.find_all("a", href=True):
-                _href_l = _a["href"].lower()
-                if any(kw in _href_l for kw in ("service", "treatment", "procedure", "cosmetic")):
+            # Collect from homepage + every sub-page soup already scraped
+            _all_candidate_soups = [all_soup] + [sp for _, sp in all_scraped_soups]
+            for _csoup in _all_candidate_soups:
+                for _a in _csoup.find_all("a", href=True):
+                    _href_l = _a["href"].lower()
+                    if not any(kw in _href_l for kw in _SVC_HREF_KW):
+                        continue
                     try:
                         _full = urljoin(base_url, _a["href"])
                         if urlparse(_full).netloc != urlparse(base_url).netloc:
