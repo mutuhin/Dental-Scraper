@@ -552,80 +552,111 @@ DATA_START_ROW = 3  # rows 1+2 are headers
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
+SAVE_EVERY = 10  # save workbook to disk after every N rows processed
+
 def run(input_path: str, output_path: str):
+    import signal
+
     log.info(f"Loading: {input_path}")
     wb = openpyxl.load_workbook(input_path)
     ws = wb.active
 
     total_rows = 0
+    rows_since_save = 0
     fb_done = ig_done = tt_done = 0
     fb_skip = ig_skip = tt_skip = 0
 
-    for row_idx in range(DATA_START_ROW, ws.max_row + 1):
-        if ws.cell(row=row_idx, column=1).value is None:
-            continue
-        total_rows += 1
+    def _save_now(reason="checkpoint"):
+        try:
+            wb.save(output_path)
+            log.info(f"  [{reason}] Saved → {output_path}  (FB:{fb_done} IG:{ig_done} TT:{tt_done})")
+        except Exception as e:
+            log.error(f"  Save failed: {e}")
 
-        practice = ws.cell(row=row_idx, column=2).value or f"row {row_idx}"
+    def _signal_handler(sig, frame):
+        log.warning(f"Signal {sig} received — saving before exit")
+        _save_now("signal")
+        sys.exit(0)
 
-        # ── Facebook ──────────────────────────────────────────────────────────
-        fb_url  = ws.cell(row=row_idx, column=COL_FB_URL  + 1).value
-        fb_fol  = ws.cell(row=row_idx, column=COL_FB_FOL  + 1).value
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT,  _signal_handler)
 
-        if fb_url and _is_missing(fb_fol):
-            log.info(f"[{row_idx}] {practice} — FB: {fb_url}")
-            posts, followers = scrape_fb(str(fb_url).strip())
-            if followers:
-                ws.cell(row=row_idx, column=COL_FB_POST + 1).value = posts or "See Page"
-                ws.cell(row=row_idx, column=COL_FB_FOL  + 1).value = followers
-                fb_done += 1
+    try:
+        for row_idx in range(DATA_START_ROW, ws.max_row + 1):
+            if ws.cell(row=row_idx, column=1).value is None:
+                continue
+            total_rows += 1
+            rows_since_save += 1
+
+            practice = ws.cell(row=row_idx, column=2).value or f"row {row_idx}"
+
+            # ── Facebook ──────────────────────────────────────────────────────
+            fb_url  = ws.cell(row=row_idx, column=COL_FB_URL  + 1).value
+            fb_fol  = ws.cell(row=row_idx, column=COL_FB_FOL  + 1).value
+
+            if fb_url and _is_missing(fb_fol):
+                log.info(f"[{row_idx}] {practice} — FB: {fb_url}")
+                posts, followers = scrape_fb(str(fb_url).strip())
+                if followers:
+                    ws.cell(row=row_idx, column=COL_FB_POST + 1).value = posts or "See Page"
+                    ws.cell(row=row_idx, column=COL_FB_FOL  + 1).value = followers
+                    fb_done += 1
+                else:
+                    log.info(f"  → FB not found")
             else:
-                log.info(f"  → FB not found")
-        else:
-            if fb_fol and not _is_missing(fb_fol):
-                fb_skip += 1  # already has data
+                if fb_fol and not _is_missing(fb_fol):
+                    fb_skip += 1
 
-        # ── Instagram ─────────────────────────────────────────────────────────
-        ig_url  = ws.cell(row=row_idx, column=COL_IG_URL  + 1).value
-        ig_fol  = ws.cell(row=row_idx, column=COL_IG_FOL  + 1).value
+            # ── Instagram ─────────────────────────────────────────────────────
+            ig_url  = ws.cell(row=row_idx, column=COL_IG_URL  + 1).value
+            ig_fol  = ws.cell(row=row_idx, column=COL_IG_FOL  + 1).value
 
-        if ig_url and _is_missing(ig_fol):
-            log.info(f"[{row_idx}] {practice} — IG: {ig_url}")
-            posts, followers = scrape_ig(str(ig_url).strip())
-            if posts or followers:
-                ws.cell(row=row_idx, column=COL_IG_POST + 1).value = posts or "See Page"
-                ws.cell(row=row_idx, column=COL_IG_FOL  + 1).value = followers or "See Page"
-                ig_done += 1
+            if ig_url and _is_missing(ig_fol):
+                log.info(f"[{row_idx}] {practice} — IG: {ig_url}")
+                posts, followers = scrape_ig(str(ig_url).strip())
+                if posts or followers:
+                    ws.cell(row=row_idx, column=COL_IG_POST + 1).value = posts or "See Page"
+                    ws.cell(row=row_idx, column=COL_IG_FOL  + 1).value = followers or "See Page"
+                    ig_done += 1
+                else:
+                    log.info(f"  → IG not found")
             else:
-                log.info(f"  → IG not found")
-        else:
-            if ig_fol and not _is_missing(ig_fol):
-                ig_skip += 1
+                if ig_fol and not _is_missing(ig_fol):
+                    ig_skip += 1
 
-        # ── TikTok ────────────────────────────────────────────────────────────
-        tt_url  = ws.cell(row=row_idx, column=COL_TT_URL  + 1).value
-        tt_fol  = ws.cell(row=row_idx, column=COL_TT_FOL  + 1).value
+            # ── TikTok ────────────────────────────────────────────────────────
+            tt_url  = ws.cell(row=row_idx, column=COL_TT_URL  + 1).value
+            tt_fol  = ws.cell(row=row_idx, column=COL_TT_FOL  + 1).value
 
-        if tt_url and _is_missing(tt_fol):
-            log.info(f"[{row_idx}] {practice} — TikTok: {tt_url}")
-            videos, followers = scrape_tiktok(str(tt_url).strip())
-            if videos or followers:
-                ws.cell(row=row_idx, column=COL_TT_POST + 1).value = videos or "See Page"
-                ws.cell(row=row_idx, column=COL_TT_FOL  + 1).value = followers or "See Page"
-                tt_done += 1
+            if tt_url and _is_missing(tt_fol):
+                log.info(f"[{row_idx}] {practice} — TikTok: {tt_url}")
+                videos, followers = scrape_tiktok(str(tt_url).strip())
+                if videos or followers:
+                    ws.cell(row=row_idx, column=COL_TT_POST + 1).value = videos or "See Page"
+                    ws.cell(row=row_idx, column=COL_TT_FOL  + 1).value = followers or "See Page"
+                    tt_done += 1
+                else:
+                    log.info(f"  → TikTok not found")
             else:
-                log.info(f"  → TikTok not found")
-        else:
-            if tt_fol and not _is_missing(tt_fol):
-                tt_skip += 1
+                if tt_fol and not _is_missing(tt_fol):
+                    tt_skip += 1
 
-    wb.save(output_path)
+            # ── Periodic save ─────────────────────────────────────────────────
+            if rows_since_save >= SAVE_EVERY:
+                _save_now("periodic")
+                rows_since_save = 0
+
+    except Exception as e:
+        log.error(f"Unexpected error: {e}")
+        _save_now("error-recovery")
+        raise
+
+    _save_now("final")
     log.info("=" * 60)
     log.info(f"Rows processed : {total_rows}")
     log.info(f"FB  filled     : {fb_done}  (already had: {fb_skip})")
     log.info(f"IG  filled     : {ig_done}  (already had: {ig_skip})")
     log.info(f"TikTok filled  : {tt_done}  (already had: {tt_skip})")
-    log.info(f"Saved → {output_path}")
 
 
 if __name__ == "__main__":
