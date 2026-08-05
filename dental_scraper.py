@@ -2449,6 +2449,28 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             _specialty = find_specialty(bio_text) if bio_text else ""
             _assoc     = find_associations(bio_text) if bio_text else ""
 
+            # Step 1.5 — if bio_url is missing, find a team page whose URL contains
+            # the doctor's last name (e.g. /meet-dr-khoury/ for Dr. Jenna Khoury).
+            # Solo-doctor bio pages rarely have team-card structure so
+            # _parse_team_page_for_doctors returns nothing, leaving bio_url empty.
+            if not bio_url and not bio_text and all_soups_for_team and _name_core:
+                _last_name_slug = _name_core.split()[-1] if _name_core else ""
+                if _last_name_slug and len(_last_name_slug) > 3:
+                    for _surl, _ssoup in all_soups_for_team:
+                        if _last_name_slug in _surl.lower():
+                            _ssoup_c = BeautifulSoup(str(_ssoup), "lxml")
+                            for _noise in _ssoup_c.find_all(["nav", "header", "footer"]):
+                                _noise.decompose()
+                            _body_el = (_ssoup_c.find(["main", "article"])
+                                        or _ssoup_c.find("body") or _ssoup_c)
+                            _page_bio = _body_el.get_text(separator=" ", strip=True)[:5000].lower()
+                            if _last_name_slug in _page_bio:
+                                bio_text  = _page_bio
+                                _specialty = find_specialty(bio_text)
+                                _assoc     = find_associations(bio_text)
+                                log.debug(f"   Step 1.5: used team page {_surl} as bio for {sec['name']!r}")
+                                break
+
             # Step 2 — follow bio URL for richer individual-page data.
             # Only fetch when card text is missing specialty OR associations so we
             # don't waste a request when the card already has everything we need.
@@ -2587,6 +2609,27 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                     _specialty = _llm_spec
                 if _llm_assoc and _need_assoc:
                     _assoc = _llm_assoc
+
+            # Step 5 — single-doctor practice: fall back to full all_text.
+            # Safe because there is no cross-doctor contamination risk.
+            # Runs when bio_text is still thin after all prior steps.
+            if (not _multi_doctor
+                    and (not _specialty or _specialty == "Not Found" or not _assoc)
+                    and len(bio_text) < 80
+                    and all_text):
+                _s5_text = all_text[:6000].lower()
+                if not _specialty or _specialty == "Not Found":
+                    _specialty = find_specialty(_s5_text)
+                if not _assoc:
+                    _assoc = find_associations(_s5_text)
+                if (ANTHROPIC_API_KEY and _ANTHROPIC_AVAILABLE
+                        and len(_s5_text) > 40
+                        and (not _specialty or _specialty == "Not Found" or not _assoc)):
+                    _llm_s5, _llm_a5 = _extract_specialty_assoc_llm(sec["name"], _s5_text)
+                    if _llm_s5 and (not _specialty or _specialty == "Not Found"):
+                        _specialty = _llm_s5
+                    if _llm_a5 and not _assoc:
+                        _assoc = _llm_a5
 
             # Step 4 — output per-doctor result.
             # Apply specialty_hint from card subtitle.
@@ -3159,6 +3202,51 @@ def _is_corp_linkedin(url: str) -> bool:
     return slug in _LINKEDIN_CORP_SLUGS
 
 
+_SOCIAL_BAD_PATH_RE = re.compile(
+    r'^/(?:'
+    r'\d{4}/'           # year-based namespace paths e.g. /2008/fbml
+    r'|plugins/'        # Facebook Like/Share plugin embeds
+    r'|feeds/'          # RSS feeds
+    r'|tr/'             # Facebook tracking pixel
+    r'|events/?$'       # generic events listing (no page name)
+    r'|groups/?$'       # generic groups listing
+    r'|pages/?$'        # generic pages listing
+    r'|photo/'          # photo pages
+    r'|video/'          # video pages
+    r'|watch'           # Facebook Watch
+    r'|gaming'          # Facebook Gaming
+    r'|marketplace'     # Facebook Marketplace
+    r'|dialog/'         # share dialogs
+    r'|l\.php'          # redirect proxy
+    r'|login'           # login page
+    r'|policy'          # policy pages
+    r'|explore'         # Instagram Explore
+    r'|reels/?$'        # Instagram Reels root
+    r')',
+    re.I,
+)
+
+def _is_valid_social_profile_url(platform: str, url: str) -> bool:
+    """Return True only when the URL looks like a real social profile/page, not a namespace/plugin/share URL."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        path   = parsed.path
+        clean  = path.strip("/")
+        if not clean:
+            return False  # bare domain with no page path
+        if _SOCIAL_BAD_PATH_RE.match(path):
+            return False
+        # First path segment must contain at least one letter (rules out /2008/ etc.)
+        first_seg = clean.split("/")[0]
+        if not re.search(r"[A-Za-z]", first_seg):
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def find_social_links(soup):
     """Extract social media URLs from anchor tags."""
     found = {p: "" for p in SOCIAL_PLATFORMS}
@@ -3167,8 +3255,10 @@ def find_social_links(soup):
         for platform in SOCIAL_PLATFORMS:
             if platform + ".com" in href and not found[platform]:
                 raw_href = a["href"]
+                if not _is_valid_social_profile_url(platform, raw_href):
+                    continue
                 if platform == "linkedin" and _is_corp_linkedin(raw_href):
-                    continue  # skip DSO parent company LinkedIn pages
+                    continue
                 found[platform] = raw_href
     return found
 
@@ -3176,6 +3266,9 @@ def find_social_links(soup):
 _SOCIAL_URL_SKIP = (
     "sharer", "/share", "intent/tweet", "api.", "/policy",
     "/help", "/login", "/signup", "/apps", "oauth",
+    # Website builder template accounts — appear in every site using that builder
+    "/squarespace", "/wix.com", "/weebly", "/godaddy",
+    "/wordpress", "/webflow", "/jimdo",
 )
 
 # LinkedIn company slugs that belong to DSO parent corporations, not individual
@@ -3232,6 +3325,8 @@ def find_social_links_regex(html):
         for m in re.findall(pattern, html, re.IGNORECASE):
             clean = m.split("?")[0].rstrip("/")
             if any(s in clean.lower() for s in _SOCIAL_URL_SKIP):
+                continue
+            if not _is_valid_social_profile_url(platform, clean):
                 continue
             if platform == "linkedin" and _is_corp_linkedin(clean):
                 continue  # skip DSO parent company LinkedIn pages
@@ -4655,12 +4750,34 @@ def scrape_practice(row, pw_page=None):
         # Capped at _svc_pw_cap to keep per-practice time bounded.
         _svc_pw_cap = 6 if IS_CI else 12
         _SVC_HREF_KW = (
+            # Existing core
             "service", "treatment", "procedure", "cosmetic", "technology",
             "laser", "implant", "whitening", "sedation", "holistic",
             "aligner", "invisalign", "cerec", "cbct", "intraoral",
             "cancer", "oral-cancer", "membership", "dental-plan",
             "restore", "restorative", "general-dentistry", "family-dentistry",
             "preventive", "prevention", "patient-care", "our-care",
+            # Common service page URL segments missed before
+            "wellness", "oral-health", "oral-clean", "dental-clean",
+            "frenectomy", "tongue-tie", "lip-tie", "tongue-and-lip",
+            "pediatric", "orthodontic", "ortho",
+            "digital-radiograph", "digital-xray", "xray", "x-ray",
+            "bio-compatible", "biological", "holistic",
+            "what-sets-us", "what-we-offer", "our-offer",
+            "crown", "filling", "root-canal", "root-care",
+            "emergency", "sleep-apnea", "sleep-dental", "snoring",
+            "tmj", "bruxism", "night-guard", "mouthguard",
+            "bonding", "composite", "porcelain", "veneer",
+            "extraction", "oral-surgery", "wisdom",
+            "fluoride", "sealant", "cleanings", "cleaning",
+            "exam", "check-up", "checkup", "x-rays",
+            "gum", "perio", "periodon",
+            "endo", "root",
+            "denture", "bridge", "partials",
+            "sleep", "apnea",
+            "special-needs", "special-care",
+            "smile", "makeover",
+            "patient-info", "patient-resource", "what-to-expect",
         )
         if pw_page and all_soup and base_url:
             _svc_pw_urls = []
@@ -4814,7 +4931,7 @@ def scrape_practice(row, pw_page=None):
                     _tech_texts.append(extract_text(_raw2) + " " + _aug2)
         _combined_tech = " ".join(_tech_texts)
         # Normalize hyphens → spaces so "cone-beam" matches "cone beam" keyword etc.
-        _combined_tech_n = _combined_tech.replace("-", " ")
+        _combined_tech_n = _combined_tech.replace("-", " ").lower()
         for keyword, tech_name in TECH_KEYWORDS.items():
             if keyword in _combined_tech_n:
                 tech_found.add(tech_name)
