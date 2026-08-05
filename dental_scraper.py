@@ -3453,60 +3453,57 @@ def _parse_fb_followers(html_or_text: str) -> str:
     return ""
 
 
-_FB_LOGIN_SIGNALS = (
-    "log in to facebook", "log into facebook",
-    "loginform", "email or phone", "you must log in",
-    '"loginrequired"', "checkpoint/block",
-    "you must be logged in", "please log in",
-    "create a new account", "forgotten password",
+# Signals that indicate a FULL login gate (entire page is a login form, no content shown).
+# IMPORTANT: "create a new account" and "forgotten password" appear on EVERY FB page
+# (including public pages with visible follower counts) in the header/footer nav,
+# so they must NOT be included here.
+_FB_HARD_LOGIN_SIGNALS = (
+    "log in to facebook",
+    "log into facebook",
+    "you must log in",
+    "you must be logged in",
+    '"loginrequired":true',
+    "checkpoint/block",
 )
 
-def _fb_is_login_wall(html: str) -> bool:
+def _fb_is_hard_login_wall(html: str) -> bool:
+    """True only when the ENTIRE page is a login gate (no profile content accessible)."""
     lc = html.lower()
-    return any(s in lc for s in _FB_LOGIN_SIGNALS)
+    return any(s in lc for s in _FB_HARD_LOGIN_SIGNALS)
 
 
 def _fb_mobile_url(url: str) -> str:
-    """Convert facebook.com URL to m.facebook.com (simpler HTML, shows counts reliably)."""
+    """Convert facebook.com URL to m.facebook.com."""
     return re.sub(r"https?://(?:www\.)?facebook\.com", "https://m.facebook.com", url, flags=re.I)
 
 def _fb_mbasic_url(url: str) -> str:
-    """Convert to mbasic.facebook.com — plain-text version, no JS, best for unauthenticated access."""
+    """Convert to mbasic.facebook.com — plain-text, no JS, shows follower counts without login."""
     return re.sub(r"https?://(?:www\.|m\.)?facebook\.com", "https://mbasic.facebook.com", url, flags=re.I)
 
 
 def _fb_cffi_get(url: str) -> str:
     """
-    Fetch a facebook.com page via curl_cffi + per-call rotating Oxylabs IP.
-    Tries desktop → mobile (m.facebook.com) → mbasic (plain-text, no JS).
-    mbasic.facebook.com shows follower counts as visible text on unauthenticated pages.
-    Returns raw HTML that contains follower data, or "" on failure.
+    Fetch a Facebook page via curl_cffi + rotating Oxylabs residential proxy.
+    Tries desktop → mobile → mbasic (plain-text, most accessible without login).
+
+    Key design: we extract follower data FIRST. If data is found we return the HTML
+    regardless of login-nav links. We only reject the page if NO data found AND a
+    hard login wall is detected (the whole page is a login form, not just a nav link).
     """
     if not _CFFI_AVAILABLE:
         return ""
     import base64 as _b64
 
-    _desktop_headers = {
-        "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "sec-fetch-site":  "none",
-        "sec-fetch-mode":  "navigate",
-        "sec-fetch-dest":  "document",
-        "Connection":      "close",
-    }
-    _mobile_headers = {
-        "User-Agent":      "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Connection":      "close",
-    }
-    _mbasic_headers = {
-        "User-Agent":      "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Connection":      "close",
-    }
+    _desktop_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    _mobile_ua  = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36"
+
+    def _headers(ua):
+        return {
+            "User-Agent":      ua,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Connection":      "close",
+        }
 
     def _make_cookies():
         datr = _b64.b64encode(os.urandom(12)).decode("ascii").rstrip("=")
@@ -3514,25 +3511,34 @@ def _fb_cffi_get(url: str) -> str:
         return {"datr": datr, "_fbp": fbp, "locale": "en_US"}
 
     urls_to_try = [
-        (url,                    _desktop_headers, ["chrome136", "chrome124"]),
-        (_fb_mobile_url(url),    _mobile_headers,  ["chrome136", "safari260"]),
-        (_fb_mbasic_url(url),    _mbasic_headers,  ["chrome136", "chrome124"]),
+        (_fb_mbasic_url(url), _headers(_mobile_ua),  ["chrome136", "chrome124"]),
+        (url,                  _headers(_desktop_ua), ["chrome136", "chrome124"]),
+        (_fb_mobile_url(url),  _headers(_mobile_ua),  ["chrome136", "safari260"]),
     ]
 
-    for _url, _headers, _profiles in urls_to_try:
+    for _url, _hdrs, _profiles in urls_to_try:
         for _profile in _profiles:
             try:
-                _px   = _fresh_social_proxy()
-                sess  = cffi_requests.Session(impersonate=_profile)
-                r     = sess.get(_url, headers=_headers, cookies=_make_cookies(),
-                                 proxies=_px, timeout=25, allow_redirects=True)
-                if r.status_code == 200 and len(r.text) > 500:
-                    if _fb_is_login_wall(r.text):
-                        log.debug(f"   FB curl_cffi login wall on {_url}")
-                        break  # login wall — try next URL variant
-                    return r.text
-                elif r.status_code not in (200, 302, 301):
-                    log.debug(f"   FB curl_cffi HTTP {r.status_code} on {_url}")
+                _px  = _fresh_social_proxy()
+                sess = cffi_requests.Session(impersonate=_profile)
+                r    = sess.get(_url, headers=_hdrs, cookies=_make_cookies(),
+                                proxies=_px, timeout=25, allow_redirects=True)
+                if r.status_code not in (200,):
+                    log.debug(f"   FB HTTP {r.status_code} on {_url} ({_profile})")
+                    continue
+                html = r.text
+                if len(html) < 500:
+                    continue
+                # Data-first: if we can already parse followers, return regardless of nav links
+                if _parse_fb_followers(html):
+                    log.debug(f"   FB data found on {_url} ({_profile})")
+                    return html
+                # No data found — only reject if it's a hard login wall
+                if _fb_is_hard_login_wall(html):
+                    log.debug(f"   FB hard login wall on {_url} ({_profile}) — trying next")
+                    break  # try next URL variant
+                # Page loaded but no follower data (e.g. page has only images/JS) — keep trying
+                log.debug(f"   FB: no follower data in {_url} ({_profile})")
             except Exception as _e:
                 log.debug(f"   FB curl_cffi error ({_profile}): {_e}")
     return ""
@@ -3558,23 +3564,24 @@ def get_facebook_stats_pw(url, page):
             log.info(f"   FB curl_cffi hit → {followers} followers")
             return "See Page", followers
 
-    # ── Strategy 2: Playwright on www.facebook.com ──────────────────────────────
-    try:
-        page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000 if IS_CI else 4000)
-        raw_content = page.content()
-        if _fb_is_login_wall(raw_content):
-            log.debug(f"   FB Playwright: login wall at {url}")
-            return "Not Found", "Not Found"
-        followers = _parse_fb_followers(raw_content) or "Not Found"
-        posts = "See Page"
-        return posts, followers
-    except PlaywrightTimeout:
-        log.warning(f"  Facebook timeout: {url}")
-        return "Not Found", "Not Found"
-    except Exception as e:
-        log.warning(f"  Facebook Playwright error: {e}")
-        return "Not Found", "Not Found"
+    # ── Strategy 2: Playwright — try mbasic URL for simpler DOM ────────────────
+    for _pw_url in [_fb_mbasic_url(url), url]:
+        try:
+            page.goto(_pw_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000 if IS_CI else 3000)
+            raw_content = page.content()
+            followers = _parse_fb_followers(raw_content)
+            if followers:
+                log.info(f"   FB Playwright hit → {followers} followers at {_pw_url}")
+                return "See Page", followers
+            if _fb_is_hard_login_wall(raw_content):
+                log.debug(f"   FB Playwright: hard login wall at {_pw_url}")
+                continue
+        except PlaywrightTimeout:
+            log.warning(f"  Facebook Playwright timeout: {_pw_url}")
+        except Exception as e:
+            log.warning(f"  Facebook Playwright error: {e}")
+    return "Not Found", "Not Found"
 
 
 def get_facebook_stats_requests(url):
@@ -3590,7 +3597,7 @@ def get_facebook_stats_requests(url):
     r = safe_get(url)
     if not r:
         return "Not Found", "Not Found"
-    if _fb_is_login_wall(r.text):
+    if _fb_is_hard_login_wall(r.text):
         return "Not Found", "Not Found"
     followers = _parse_fb_followers(r.text) or "Not Found"
     return "See Page", followers
@@ -3600,10 +3607,15 @@ def get_facebook_stats_requests(url):
 # PLAYWRIGHT — Instagram
 # ─────────────────────────────────────────────────────────────────────────────
 
+# IG login wall: only hard signals — "create an account" / "sign up" appear
+# on many IG pages even when partial content is accessible, so they are excluded.
 _IG_LOGIN_SIGNALS = (
-    "log in to instagram", "log into instagram", "loginform",
-    '"requiresLogin"', "create an account", "sign up for instagram",
-    "not-logged-in", "LoginAndSignupPage",
+    "log in to instagram",
+    "log into instagram",
+    '"requiresLogin":true',
+    "loginandsignuppage",
+    "this page isn't available",
+    "sorry, this page",
 )
 
 def _ig_is_login_wall(html: str) -> bool:
@@ -3788,14 +3800,17 @@ def get_instagram_stats_api(ig_url: str) -> tuple[str, str]:
             r = sess.get(f"https://www.instagram.com/{username}/", headers=_html_headers,
                          cookies=_ig_cookies(), proxies=_px, timeout=25, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > 1000:
-                if _ig_is_login_wall(r.text):
-                    log.debug(f"  IG HTML login wall for @{username} ({_profile})")
-                    continue
+                # Data-first: extract before checking login wall
                 posts, followers = _parse_ig_html(r.text)
                 if posts or followers:
                     log.info(f"  IG HTML hit → {posts} posts, {followers} followers for @{username}")
                     return posts, followers
-            log.debug(f"  IG HTML status {r.status_code} for @{username} ({_profile})")
+                if _ig_is_login_wall(r.text):
+                    log.debug(f"  IG HTML login wall for @{username} ({_profile})")
+                    continue
+                log.debug(f"  IG HTML: no data found for @{username} ({_profile})")
+            else:
+                log.debug(f"  IG HTML status {r.status_code} for @{username} ({_profile})")
         except Exception as e:
             log.debug(f"  IG HTML error for @{username} ({_profile}): {e}")
 
@@ -4817,6 +4832,7 @@ def scrape_practice(row, pw_page=None):
         log.warning(f"   No website for: {name}")
 
     # ── 2. Social media stats ─────────────────────────────────────────────────
+    log.info(f"   Social: cffi={'yes' if _CFFI_AVAILABLE else 'NO'} proxy={'yes' if _BYPASS_PROXY else 'NO'}")
     if result["facebook_url"]:
         log.info("   Fetching Facebook stats…")
         if pw_page and USE_PLAYWRIGHT:
