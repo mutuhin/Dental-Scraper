@@ -1146,7 +1146,7 @@ def find_email_pw(website, page):
 _SKIP_WORDS = (
     "patient", "office", "staff", "appointment", "service",
     "insurance", "dental", "care", "treatment", "contact",
-    "welcome", "schedule", "hour", "location",
+    "welcome", "schedule", "hours", "location",
     "difference", "experience", "results", "overview",
     "directions", "meet", "learn", "blog", "menu", "home",
     "today", "read", "more", "view", "skip", "once",
@@ -1199,6 +1199,10 @@ _INVALID_NAME_WORDS = frozenset({
     "hospital", "institute", "academy", "university", "college",
     # "Dr." appearing as a word mid-name ("Dr. Natalie Dr") must be blocked
     "dr",
+    # Street / address words — prevent "123 Main Street Ackerman, MS" → "Street Ackerman, MS"
+    "street", "avenue", "drive", "boulevard", "lane", "road", "court",
+    "place", "way", "circle", "suite", "blvd", "pkwy", "parkway", "hwy",
+    "highway", "route", "north", "south", "east", "west", "center",
     # dental specialty / service area words that appear as "names" on service pages
     # e.g. "Adult Dentistry, DDS" / "Adolescent Dentistry" / "Special-Needs Dentistry"
     "dentistry", "periodontics", "endodontics", "prosthodontics", "pedodontics",
@@ -1328,11 +1332,23 @@ def _extract_names_from_soup(soup):
             _ext = _CRED_TAIL_RE.match(_after)
             if _ext:
                 clean = re.sub(r"\s+", " ", (clean + _ext.group(0)).strip())
-            if (len(clean.split()) >= 2
-                    and not re.search(r'\d', clean)
-                    and not any(w in clean.lower() for w in _SKIP_WORDS)
-                    and _is_valid_doctor_name(clean)):
-                names.add(clean)
+            if re.search(r'\d', clean):
+                continue
+            if any(w in clean.lower() for w in _SKIP_WORDS):
+                continue
+            if not _is_valid_doctor_name(clean):
+                continue
+            # Require at least 2 real name words after stripping "Dr." prefix
+            # — prevents "Dr. John" / "Dr. Cantwell" / "Dr. Mo" single-word captures
+            _name_body = re.sub(r'^Dr\.?\s+', '', clean, flags=re.I).strip()
+            _name_body = re.sub(
+                r'[,\s]+(?:DDS|DMD|MD|MS|FAGD|MAGD|FICOI|FACD|FICD|AACD|ABGD|ABPD'
+                r'|ABOD|ABCD|Ph\.?D\.?).*$', '', _name_body, flags=re.I
+            ).strip()
+            _real_words = [w for w in _name_body.split() if len(w.strip('.,-()*')) > 1]
+            if len(_real_words) < 2:
+                continue  # first-name or last-name only — skip
+            names.add(clean)
     return names
 
 
@@ -3062,10 +3078,13 @@ def _extract_specialty_phrase(text: str) -> str:
     _REJECT = re.compile(
         r'\b(?:Dr\.|DDS|DMD|MD\b|C-FNP|NP\b|PA\b|LISW|LCSW|APRN|'
         r'View\s+Profile|Healthsource|Schedule|Appointment|'
-        r'Aspects\b|Every\s+Age|Every\s+Patient|'
+        r'Aspects\b|Every\s+Age|Every\s+Patient|For\s+All\s+Ages|'
+        r'Of\s+All\s+Ages|All\s+Ages|'
         r'Highest\s+Standard|Highest\s+Level|Constant\s+Pursuit|'
         r'Committed\s+To|Commitment\s+To|Continuing\s+Education\b|'
-        r'Patient\s+Care|Our\s+Team|Our\s+Practice|'
+        r'Patient\s+Care|Our\s+Team|Our\s+Practice|Throughout\s+My|'
+        r'Throughout\s+Her|Throughout\s+His|I\s+Have\s+Found|Career\b|'
+        r'Rewarding|Challenging|From\s+The|At\s+The|Institute\b|University\b|'
         r'And\s+Is\s+Committ|And\s+Has\s+Spoken|'
         r'Quote\b|Passionate\s+About|Dedicated\s+To|Mission\s+Is|'
         r'Believe\s+In|Goal\s+Is|Philosophy|I\s+Am\s+Very)\b',
@@ -3083,10 +3102,14 @@ def _extract_specialty_phrase(text: str) -> str:
                 r'when\s+(?:he|she|they)\b|and\s+is\b|and\s+has\b|and\s+was\b)',
                 phrase, flags=re.I
             )[0]
-            phrase = phrase[:150].strip().rstrip(' ,;.')
+            # Cap at 80 characters — longer phrases are bio sentences, not specialties
+            phrase = phrase[:80].strip().rstrip(' ,;.')
             if _REJECT.search(phrase):
                 continue
             if not _VALID_SPEC.search(phrase):
+                continue
+            # Reject if phrase has more than 9 words — sentence, not a specialty label
+            if len(phrase.split()) > 9:
                 continue
             if phrase:
                 return phrase.title() if phrase == phrase.lower() else phrase
@@ -3173,14 +3196,19 @@ def find_specialty(text):
             found.append(label)
             seen_labels.add(label)
 
-    # Always try to extract a verbatim certificate/training phrase — these carry
-    # the doctor's own words (e.g. "implant dentistry, third molar extraction,
-    # sleep apnea, and clear aligners") which are more specific than category labels.
+    # Remove "General Dentistry" and "Family Dentistry" when more specific
+    # specialties are already present — they add noise and inflate the list.
+    _specific = [l for l in found if l not in ("General Dentistry", "Family Dentistry")]
+    if len(_specific) >= 2:
+        found = _specific
+    # Cap at 5 specialties — long lists are usually practice-wide services,
+    # not the individual doctor's own specialty focus.
+    found = found[:5]
+
+    # Try to extract a verbatim specialty phrase from bio text.
     _phrase = _extract_specialty_phrase(text)
 
     if found and _phrase:
-        # Combine: keyword categories + verbatim phrase (phrase takes priority as it
-        # contains the actual specialties listed by the doctor)
         return _phrase
     if found:
         return " / ".join(found)
@@ -5190,13 +5218,26 @@ def write_output(practices_data, output_path):
         # Build doctor list: prefer per-doctor list; fall back to single row
         doctors = list(s.get("doctors") or [])
         if not doctors:
-            fallback_name = (
-                s.get("scraped_doctor_names")
-                or inp.get("Doctor Name")
-                or "Not Found"
-            )
+            _scraped = s.get("scraped_doctor_names") or ""
+            _inp_raw = (inp.get("Doctor Name") or "").strip()
+
+            # Validate the input-column fallback: only use it if it actually looks
+            # like a doctor name (has Dr. prefix, or credential, or 2+ proper-case
+            # name words). Rejects garbage like "Sleep Solutions Ambassador",
+            # "Highlands Ranch", "Gum Sculpting" that appear in source data.
+            def _inp_looks_like_doctor(name: str) -> bool:
+                if not name or name.lower() in ("not found", "n/a", "none", ""):
+                    return False
+                if re.search(r'Dr\.?\s+[A-Z]', name):
+                    return True  # has Dr. prefix
+                if re.search(r',\s*(?:DDS|DMD|MD|MS|FAGD|MAGD)\b', name, re.I):
+                    return True  # has credential suffix
+                return False  # require Dr. prefix or credential — bare words rejected
+
+            _inp_valid = _inp_raw if _inp_looks_like_doctor(_inp_raw) else ""
+            fallback_name = _scraped or _inp_valid or "Not Found"
             if fallback_name in ("Not Found", "", None):
-                fallback_name = inp.get("Doctor Name") or "Not Found"
+                fallback_name = "Not Found"
             doctors = [{
                 "name":         fallback_name,
                 "specialty":    "",
