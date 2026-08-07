@@ -24,9 +24,13 @@ def main():
     batch_start = (batch - 1) * BATCH_SIZE + 1   # 1-based first row of this batch
     batch_end   = batch * BATCH_SIZE              # 1-based last row
 
-    # Optional start_row lets you resume mid-batch (e.g. "python run_batch.py 1 95")
+    # Optional start_row: accepts either an absolute row number (e.g. 2561)
+    # or a within-batch offset 1-100 (e.g. 61 meaning the 61st row of the batch).
     if len(sys.argv) > 2 and sys.argv[2].strip():
         start_row = int(sys.argv[2])
+        # Within-batch offset (1-100) → convert to absolute row number
+        if 1 <= start_row <= BATCH_SIZE:
+            start_row = batch_start + start_row - 1
         if start_row < batch_start or start_row > batch_end:
             print(f"start_row {start_row} is outside batch {batch} range ({batch_start}-{batch_end})")
             sys.exit(1)
