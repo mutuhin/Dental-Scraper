@@ -51,7 +51,7 @@ jobs:
         if: ${{ inputs.mode == 'urls' }}
         run: |
           python bypass_scraper.py \
-            --urls ${{ inputs.urls }} \
+            --urls "${{ inputs.urls }}" \
             --proxies proxies.txt \
             --output bypass_output.xlsx
 
