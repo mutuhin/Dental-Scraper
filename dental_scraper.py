@@ -4301,6 +4301,7 @@ def scrape_practice(row, pw_page=None):
         all_text = ""
         all_soup = None
         pw_loaded_homepage = False
+        _homepage_cf_blocked = False   # True when ALL requests failed with CF block
 
         # ── a) Try requests (with SSL bypass built-in) ────────────────────────
         r = safe_get(website)
@@ -4317,11 +4318,30 @@ def scrape_practice(row, pw_page=None):
             all_text = extract_text(r.text)
             _merge_socials(all_soup, r.text)
             _cache("homepage", r.url, r.text)
+        else:
+            # Quick HEAD to determine whether failure was CF-gating vs. unreachable.
+            # Skip Playwright for CF-gated sites — it hangs on JS challenge pages and
+            # can't bypass Cloudflare without a real solving capability anyway.
+            try:
+                _probe = requests.head(
+                    base_url, headers=HEADERS, timeout=6, verify=False, allow_redirects=True,
+                )
+                if _is_cloudflare_block(_probe):
+                    _homepage_cf_blocked = True
+                    log.warning(
+                        f"   Cloudflare-gated (HTTP {_probe.status_code}) — skipping Playwright to avoid hang"
+                    )
+                    result["skip_reason"] = f"Bot Protection (Cloudflare {_probe.status_code})"
+            except Exception:
+                pass
 
         # ── b) Playwright fallback when requests completely fails ─────────────
-        if not all_soup and pw_page:
+        # Do NOT attempt Playwright for CF-gated sites: page.goto() hangs
+        # indefinitely on JS challenge pages and SIGALRM cannot interrupt it.
+        if not all_soup and pw_page and not _homepage_cf_blocked:
             log.info("   Requests failed — using Playwright for homepage…")
-            urls_to_try = [base_url] + _url_variations(base_url)
+            # Only try base_url — iterating all variants multiplies hang risk
+            urls_to_try = [base_url]
             for try_url in urls_to_try:
                 try:
                     pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
