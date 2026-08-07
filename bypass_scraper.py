@@ -81,6 +81,10 @@ try:
 except ImportError:
     sys.exit("dental_scraper.py must be in the same folder")
 
+# Tell dental_scraper to allow Playwright on CF-gated sites — bypass scraper's
+# stealth+proxy Playwright can actually solve challenges, unlike the plain scraper.
+ds.BYPASS_MODE = True
+
 # ── Stealth JS (injected into every Playwright page) ─────────────────────────
 
 _STEALTH_JS = """
@@ -190,8 +194,10 @@ def _bypass_safe_get(url, retries=2):
                 if r.status_code == 200 and not _is_challenge_html(r):
                     ds.log.info(f"   [bypass] curl_cffi/{profile} OK: {url}")
                     return r
-                # 202 = Sucuri JS challenge; 403 = IP block — move to proxy
-                break
+                # Hard block (403/407) — no point trying other profiles without proxy
+                if r.status_code in (403, 407):
+                    break
+                # 202 / other challenge — try next profile before giving up
             except Exception:
                 continue
 
@@ -264,17 +270,22 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
 
     def _load(page):
         page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-        page.goto(url, timeout=25000, wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
-        # Wait for Cloudflare JS challenge to auto-resolve
-        for _ in range(3):
+        page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        # Wait for Cloudflare JS challenge to auto-resolve (up to 5 × 4s = 20s)
+        for _ in range(5):
             title = page.title().lower()
-            if "just a moment" in title or "checking your" in title:
-                page.wait_for_timeout(5000)
+            if any(m in title for m in ("just a moment", "checking your", "please wait", "one moment")):
+                page.wait_for_timeout(4000)
             else:
                 break
         html = page.content()
-        return html if len(html) > 2000 else None
+        if len(html) < 2000:
+            return None
+        snippet = html[:3000].lower()
+        if any(m in snippet for m in _CHALLENGE_MARKERS):
+            return None
+        return html
 
     if pw_context is not None:
         try:
@@ -287,16 +298,24 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
             ds.log.warning(f"   [bypass] Playwright failed for {url}: {e}")
             return None
 
-    try:
-        with sync_playwright() as pw:
-            ctx  = _make_pw_context(pw, proxy_url)
-            page = ctx.new_page()
-            html = _load(page)
-            ctx.close()
-            return html
-    except Exception as e:
-        ds.log.warning(f"   [bypass] Playwright failed for {url}: {e}")
-        return None
+    # Try without proxy first, then with proxy if that fails
+    for use_proxy in [False, True]:
+        _proxy = proxy_url if use_proxy else None
+        if use_proxy and not _proxy_pool:
+            break
+        if use_proxy and not _proxy:
+            _proxy = _next_proxy()
+        try:
+            with sync_playwright() as pw:
+                ctx  = _make_pw_context(pw, _proxy)
+                page = ctx.new_page()
+                html = _load(page)
+                ctx.close()
+                if html:
+                    return html
+        except Exception as e:
+            ds.log.warning(f"   [bypass] Playwright{'(+proxy)' if use_proxy else ''} failed for {url}: {e}")
+    return None
 
 
 # ── Detect bot-blocked rows in a batch Excel output ───────────────────────────
@@ -459,7 +478,8 @@ def _fetch_html_bypass(url, pw_context=None):
                 r = sess.get(url, timeout=15, verify=False, allow_redirects=True)
                 if r.status_code == 200 and not _is_challenge_html(r):
                     return r.text
-                break
+                if r.status_code in (403, 407):
+                    break  # hard block — skip remaining profiles
             except Exception:
                 continue
     # Fall back to Playwright stealth

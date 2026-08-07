@@ -93,6 +93,9 @@ OUTPUT_FILE  = "/Users/mujahidulhaqtuhin/Downloads/dental/py files/100data.xlsx"
 SKIPPED_DIR  = "skipped"   # folder + file for bot-blocked / unreachable sites
 # In GitHub Actions (CI=true) use tighter limits so 100 practices finish in ~3-4h
 IS_CI             = os.environ.get("CI", "").lower() in ("true", "1")
+# Set to True by bypass_scraper.py — disables the CF-site Playwright skip so
+# stealth+proxy Playwright can actually render bot-protected pages.
+BYPASS_MODE       = False
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DELAY_SEC    = 0.5  if IS_CI else 2.5   # short in CI — same pages, faster
 TIMEOUT      = 10   if IS_CI else 15
@@ -4338,7 +4341,7 @@ def scrape_practice(row, pw_page=None):
         # ── b) Playwright fallback when requests completely fails ─────────────
         # Do NOT attempt Playwright for CF-gated sites: page.goto() hangs
         # indefinitely on JS challenge pages and SIGALRM cannot interrupt it.
-        if not all_soup and pw_page and not _homepage_cf_blocked:
+        if not all_soup and pw_page and (not _homepage_cf_blocked or BYPASS_MODE):
             log.info("   Requests failed — using Playwright for homepage…")
             # Only try base_url — iterating all variants multiplies hang risk
             urls_to_try = [base_url]
