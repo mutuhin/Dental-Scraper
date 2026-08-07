@@ -4086,7 +4086,7 @@ def get_invisalign_tier_pw(practice_name, city, state, zip_code, page):
     url = f"https://www.invisalign.com/find-a-doctor#q={quote_plus(search_term)}"
 
     try:
-        page.goto(url, timeout=PW_TIMEOUT * 2, wait_until="networkidle")
+        page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(3000 if IS_CI else 6000)
 
         # Try typing into the search box if it exists
