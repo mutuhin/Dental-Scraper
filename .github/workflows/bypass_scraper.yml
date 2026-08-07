@@ -49,9 +49,11 @@ jobs:
       # ── mode: urls ────────────────────────────────────────────────────────
       - name: Run bypass (URLs mode)
         if: ${{ inputs.mode == 'urls' }}
+        env:
+          BYPASS_URLS: ${{ inputs.urls }}
         run: |
           python bypass_scraper.py \
-            --urls "${{ inputs.urls }}" \
+            --urls "$BYPASS_URLS" \
             --proxies proxies.txt \
             --output bypass_output.xlsx
 
