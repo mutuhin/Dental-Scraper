@@ -836,6 +836,16 @@ def _is_cloudflare_block(r) -> bool:
     return False
 
 
+def _pw_alive(page) -> bool:
+    """Return True only if the Playwright page is still usable (browser not crashed)."""
+    if page is None:
+        return False
+    try:
+        return not page.is_closed()
+    except Exception:
+        return False
+
+
 def _cffi_get(url) -> "requests.Response | None":
     """
     Try curl_cffi with rotating Chrome/Safari profiles to bypass bot protection.
@@ -3707,6 +3717,10 @@ def get_facebook_stats_pw(url, page):
             log.warning(f"  Facebook Playwright timeout: {_pw_url}")
         except Exception as e:
             log.warning(f"  Facebook Playwright error: {e}")
+            # Empty-message exception = browser process crashed.
+            # Raise so caller can disable pw_page and skip remaining Playwright ops.
+            if not _pw_alive(page):
+                raise RuntimeError("playwright_browser_dead") from e
     return "Not Found", "Not Found"
 
 
@@ -3843,7 +3857,7 @@ def get_instagram_stats_pw(url, page):
     Navigate to an Instagram profile page and extract post + follower counts.
     Returns (posts_str, followers_str).
     """
-    if not url or not page:
+    if not url or not _pw_alive(page):
         return "Not Found", "Not Found"
     _social_sleep()
     try:
@@ -5004,7 +5018,15 @@ def scrape_practice(row, pw_page=None):
     if result["facebook_url"]:
         log.info("   Fetching Facebook stats…")
         if pw_page and USE_PLAYWRIGHT:
-            _p, f = get_facebook_stats_pw(result["facebook_url"], pw_page)
+            try:
+                _p, f = get_facebook_stats_pw(result["facebook_url"], pw_page)
+            except RuntimeError as _pwe:
+                if "playwright_browser_dead" in str(_pwe):
+                    log.warning("  Playwright browser crashed — disabling for rest of practice")
+                    pw_page = None   # disable all remaining Playwright calls this practice
+                    _p, f = "Not Found", "Not Found"
+                else:
+                    raise
         else:
             _p, f = get_facebook_stats_requests(result["facebook_url"])
         # facebook_posts intentionally not captured (per user request)
@@ -5033,7 +5055,7 @@ def scrape_practice(row, pw_page=None):
         result["linkedin_followers"] = "See Profile"
 
     # ── 2b. Facebook URL fallback — search Google if not found on website ────────
-    if not result["facebook_url"] and pw_page and USE_PLAYWRIGHT:
+    if not result["facebook_url"] and _pw_alive(pw_page) and USE_PLAYWRIGHT:
         log.info("   Facebook not found on site — searching Google…")
         fb_found = find_facebook_url_via_search(name, city, state, pw_page)
         if fb_found:
@@ -5043,7 +5065,7 @@ def scrape_practice(row, pw_page=None):
             result["facebook_followers"] = f
 
     # ── 2c. Email fallback — Facebook About page ──────────────────────────────
-    if result["email"] == "Not Found" and result["facebook_url"] and pw_page:
+    if result["email"] == "Not Found" and result["facebook_url"] and _pw_alive(pw_page):
         log.info("   Trying Facebook About page for email…")
         found = find_email_from_fb_about(result["facebook_url"], pw_page)
         if found:
@@ -5599,6 +5621,27 @@ def main():
                 # Always cancel the alarm so the next practice starts with a fresh timer
                 if _use_alarm:
                     _signal.alarm(0)
+                # Restart Playwright page if it died during this practice so the
+                # next practice starts with a clean browser (not a crashed one).
+                if pw_context and not _pw_alive(pw_page):
+                    log.warning("  Playwright page dead after practice — reopening for next…")
+                    try:
+                        pw_page = pw_context.new_page()
+                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                    except Exception:
+                        try:
+                            pw_context.close()
+                        except Exception:
+                            pass
+                        _pw2 = sync_playwright().__enter__()
+                        pw_context = _pw2.chromium.launch_persistent_context(
+                            user_data_dir="", headless=True,
+                            ignore_https_errors=True,
+                            args=["--disable-blink-features=AutomationControlled"],
+                            user_agent=HEADERS["User-Agent"],
+                        )
+                        pw_page = pw_context.new_page()
+                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
 
             all_results.append((practice, scraped))
 
