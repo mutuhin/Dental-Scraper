@@ -1222,11 +1222,30 @@ _INVALID_NAME_WORDS = frozenset({
     "adolescent", "adult", "special", "needs",
     "cosmetic", "preventive", "restorative", "reconstructive", "corrective",
     "geriatric", "senior", "infant", "toddler", "child", "children",
+    # role/title words that appear as "names" (e.g. "Pediatric Dentist DDS")
+    "dentist", "dentists", "pediatric", "general", "provider", "providers",
     # heading / page-section words captured as names
     "professional", "membership", "memberships",
     "service", "services", "location", "locations",
     "information", "overview", "description", "biography", "profile",
     "affordable", "local", "premier", "modern",
+    # placeholder / UI text that appears in "team" sections before real content
+    "coming", "soon", "stars", "star", "up", "down",
+    "placeholder", "tbd", "announcement", "available", "announced",
+    "ratings", "rating", "reviews", "review", "score",
+})
+
+# Exact phrases (lowercased) that are never a real doctor name — checked first in
+# _is_valid_doctor_name before word-level analysis.
+_PLACEHOLDER_PHRASES = frozenset({
+    "coming soon", "stars up", "stars down", "five stars", "four stars",
+    "three stars", "two stars", "one star", "under construction",
+    "new doctor", "doctor coming soon", "dentist coming soon",
+    "our team", "our staff", "our doctors", "our dentists",
+    "meet our team", "meet the team", "meet our doctor", "meet our dentist",
+    "patient reviews", "google reviews", "yelp reviews",
+    "pediatric dentist", "general dentist", "family dentist",
+    "cosmetic dentist", "emergency dentist", "sedation dentist",
 })
 
 # Roman numerals and common suffixes that ARE valid all-uppercase name words
@@ -1236,6 +1255,16 @@ _MEDICAL_SUFFIXES = ("istry", "ology", "ship", "ships", "tion", "ness", "care", 
 
 def _is_valid_doctor_name(name: str) -> bool:
     """Return False if any word in the name is clearly not a real name component."""
+    # Phrase-level block: catch exact placeholder text before word analysis
+    _name_lc = re.sub(r'\s+', ' ', name.strip().lower())
+    # Strip credentials suffix for phrase check too
+    _name_lc_bare = re.sub(
+        r'[,\s]+(?:dds|dmd|md|ms|fagd|magd|ficoi|facd|ficd|aacd|abgd|abpd|abod|abcd|ph\.?d\.?).*$',
+        '', _name_lc
+    ).strip()
+    _name_lc_bare = re.sub(r'^dr\.?\s+', '', _name_lc_bare).strip()
+    if _name_lc_bare in _PLACEHOLDER_PHRASES:
+        return False
     # Strip leading 'Dr.' / 'Dr' prefix for word analysis
     stripped = re.sub(r'^Dr\.?\s+', '', name, flags=re.IGNORECASE).strip()
     # Strip trailing credentials
