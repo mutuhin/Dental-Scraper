@@ -1,0 +1,100 @@
+name: URL Scraper (Full Capture)
+
+# Scrape any list of dental practice URLs with stealth Playwright + proxy.
+# Use this for URLs that the main batch scraper couldn't capture (bot-blocked,
+# Cloudflare, JS-heavy pages, etc.).
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: >
+          Paste practice website URLs — one per line or comma-separated.
+          Example: https://site1.com, https://site2.com
+        required: true
+        default: ""
+
+jobs:
+  scrape_urls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300   # 5 hours — Playwright + proxy is slow per site
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests beautifulsoup4 openpyxl lxml curl-cffi \
+                      playwright tqdm fake-useragent
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Write proxies file
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+        run: |
+          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" > proxies.txt
+          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@us-pr.oxylabs.io:10000" >> proxies.txt
+          echo "Proxy file written (credentials hidden)"
+
+      - name: Normalise URL list
+        id: normalise
+        env:
+          RAW_URLS: ${{ inputs.urls }}
+        run: |
+          # Replace commas and newlines with spaces, strip blank entries
+          CLEAN=$(python3 -c "
+          import os, re
+          raw = os.environ.get('RAW_URLS', '')
+          urls = re.split(r'[\s,]+', raw)
+          urls = [u.strip() for u in urls if u.strip().startswith('http')]
+          print(' '.join(urls))
+          ")
+          echo "CLEAN_URLS=$CLEAN" >> "$GITHUB_ENV"
+          echo "URL count: $(echo $CLEAN | wc -w)"
+          echo "$CLEAN" | tr ' ' '\n'
+
+      - name: Run URL scraper
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+        run: |
+          python bypass_scraper.py \
+            --urls $CLEAN_URLS \
+            --proxies proxies.txt \
+            --output url_scrape_output.xlsx
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-scrape-output
+          path: url_scrape_output.xlsx
+          retention-days: 30
+          overwrite: true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### URL Scraper Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f url_scrape_output.xlsx ]; then
+            echo "Output artifact: **url-scrape-output**" >> $GITHUB_STEP_SUMMARY
+            echo "File size: $(du -h url_scrape_output.xlsx | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**No output file — scraper may have failed**" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "URLs scraped:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$CLEAN_URLS" | tr ' ' '\n' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
