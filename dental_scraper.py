@@ -4415,7 +4415,44 @@ def scrape_practice(row, pw_page=None):
                             and len(pw_html) < 60000)
                     )
                     if _is_cf_challenge:
-                        # Playwright can't solve this — try curl_cffi with proxy
+                        if BYPASS_MODE:
+                            # Stealth Playwright + proxy may auto-solve the CF challenge.
+                            # Wait up to 30 s (6 × 5 s) for it to pass.
+                            log.info(f"   Playwright (bypass): CF challenge detected — waiting for auto-solve…")
+                            for _ in range(6):
+                                pw_page.wait_for_timeout(5000)
+                                try:
+                                    _pw_title = pw_page.title().lower()
+                                except Exception:
+                                    break
+                                if not any(m in _pw_title for m in
+                                           ("just a moment", "checking your", "please wait", "one moment")):
+                                    log.info(f"   Playwright (bypass): CF challenge resolved!")
+                                    break
+                            # Soft networkidle after challenge — let JS render
+                            try:
+                                pw_page.wait_for_load_state("networkidle", timeout=10000)
+                            except Exception:
+                                pass
+                            try:
+                                pw_html = pw_page.content()
+                            except Exception:
+                                pw_html = ""
+                            if pw_html and len(pw_html) > 2000:
+                                _cf_snippet = pw_html[:3000].lower()
+                                _still_cf = any(m in _cf_snippet for m in
+                                                ("just a moment", "checking your browser",
+                                                 "please enable cookies"))
+                                if not _still_cf:
+                                    base_url = try_url
+                                    all_soup = BeautifulSoup(pw_html, "lxml")
+                                    all_text = extract_text(pw_html)
+                                    pw_loaded_homepage = True
+                                    _merge_socials(all_soup, pw_html)
+                                    _cache("homepage", try_url, pw_html)
+                                    log.info(f"   Playwright (bypass): CF solved, page loaded")
+                                    break
+                        # Plain Playwright can't solve CF — try curl_cffi with proxy
                         log.info(f"   Playwright: challenge at {try_url} — trying curl_cffi bypass…")
                         _proxy_r = _cffi_get(try_url)
                         if _proxy_r and len(_proxy_r.text) > 2000:

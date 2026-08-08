@@ -85,6 +85,13 @@ except ImportError:
 # stealth+proxy Playwright can actually solve challenges, unlike the plain scraper.
 ds.BYPASS_MODE = True
 
+# On CI, dental_scraper uses very short Playwright waits (1 s) and timeouts (15 s)
+# which aren't enough for JS-heavy / CF-protected sites.  Override them here so
+# the bypass scraper always uses the longer "local" timings regardless of CI env.
+ds.IS_CI                   = False
+ds.PW_TIMEOUT              = 30000   # 30 s per page.goto (was 15 s in CI)
+ds._PROXY_CAP_PER_PRACTICE = 40      # bypass sites need more proxy calls (was 15)
+
 # ── Stealth JS (injected into every Playwright page) ─────────────────────────
 
 _STEALTH_JS = """
@@ -221,7 +228,15 @@ def _bypass_safe_get(url, retries=2):
                 continue
 
     # ── Strategy 3: original safe_get ────────────────────────────────────────
-    return _orig_safe_get(url, retries=retries)
+    # IMPORTANT: if safe_get returns a Cloudflare challenge page (status 200
+    # but challenge HTML), return None so that scrape_practice's Playwright
+    # fallback is triggered.  Without this, all_soup gets set to CF HTML and
+    # Playwright is never attempted.
+    _fallback = _orig_safe_get(url, retries=retries)
+    if _fallback and _is_challenge_html(_fallback):
+        ds.log.info(f"   [bypass] safe_get returned CF challenge — deferring to Playwright")
+        return None
+    return _fallback
 
 
 # ── Playwright with stealth + optional proxy ──────────────────────────────────
@@ -270,15 +285,21 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
 
     def _load(page):
         page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-        page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-        # Wait for Cloudflare JS challenge to auto-resolve (up to 5 × 4s = 20s)
-        for _ in range(5):
+        page.goto(url, timeout=45000, wait_until="domcontentloaded")
+        # Wait for Cloudflare JS challenge to auto-resolve (up to 6 × 5s = 30s)
+        for _ in range(6):
             title = page.title().lower()
             if any(m in title for m in ("just a moment", "checking your", "please wait", "one moment")):
-                page.wait_for_timeout(4000)
+                page.wait_for_timeout(5000)
             else:
                 break
+        # After CF resolves (or no CF), wait for JS to render page content.
+        # Try a soft networkidle (capped at 10s) — safe because we have a timeout.
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass   # fine if it times out — page.content() still gets what loaded
+        page.wait_for_timeout(3000)   # extra grace for React/SPA hydration
         html = page.content()
         if len(html) < 2000:
             return None
