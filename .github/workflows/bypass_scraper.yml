@@ -39,7 +39,7 @@ jobs:
         run: |
           pip install --quiet \
             openpyxl requests beautifulsoup4 lxml \
-            curl_cffi playwright
+            curl_cffi playwright playwright-stealth
           playwright install chromium --with-deps
 
       - name: Write proxy file

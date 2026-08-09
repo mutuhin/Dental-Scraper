@@ -4390,8 +4390,16 @@ def scrape_practice(row, pw_page=None):
             urls_to_try = [base_url]
             for try_url in urls_to_try:
                 try:
-                    pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
-                    pw_page.wait_for_timeout(1000 if IS_CI else 2500)
+                    # Use "commit" in BYPASS_MODE: CF Enterprise holds the connection
+                    # open running its JS challenge, so "domcontentloaded" never fires
+                    # and times out after 30 s even though the server IS responding.
+                    # "commit" fires on first byte, letting us then wait for CF to solve.
+                    _pw_wait = "commit" if BYPASS_MODE else "domcontentloaded"
+                    try:
+                        pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until=_pw_wait)
+                    except Exception:
+                        pass   # commit/domcontentloaded timeout — still check content
+                    pw_page.wait_for_timeout(1000 if (IS_CI and not BYPASS_MODE) else 2500)
                     try:
                         pw_html = pw_page.content()
                     except Exception:

@@ -74,6 +74,12 @@ except ImportError:
     print("WARNING: playwright not installed — JS-site bypass disabled")
     print("         pip install playwright && playwright install chromium")
 
+try:
+    from playwright_stealth import stealth_sync as _stealth_sync
+    _STEALTH_LIB_OK = True
+except ImportError:
+    _STEALTH_LIB_OK = False   # falls back to manual stealth JS below
+
 # ── Import dental_scraper functions ──────────────────────────────────────────
 
 try:
@@ -252,6 +258,21 @@ def _pw_proxy_dict(proxy_url):
     return d
 
 
+def _apply_stealth(page):
+    """Apply playwright-stealth if available, else fall back to manual JS patch."""
+    if _STEALTH_LIB_OK:
+        try:
+            _stealth_sync(page)
+            return
+        except Exception:
+            pass
+    # Manual fallback — less comprehensive but doesn't require the package
+    try:
+        page.add_init_script(script=_STEALTH_JS)
+    except Exception:
+        pass
+
+
 def _make_pw_context(pw, proxy_url=None):
     kwargs = dict(
         user_data_dir="",
@@ -262,13 +283,16 @@ def _make_pw_context(pw, proxy_url=None):
             "--disable-infobars",
             "--window-size=1920,1080",
             "--no-first-run",
+            "--disable-dev-shm-usage",
         ],
         user_agent=ds.HEADERS["User-Agent"],
     )
     if proxy_url:
         kwargs["proxy"] = _pw_proxy_dict(proxy_url)
     ctx = pw.chromium.launch_persistent_context(**kwargs)
-    ctx.add_init_script(script=_STEALTH_JS)
+    # Inject stealth on context level — applies to every page opened on this context
+    if not _STEALTH_LIB_OK:
+        ctx.add_init_script(script=_STEALTH_JS)
     return ctx
 
 
@@ -284,23 +308,45 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
         return None
 
     def _load(page):
+        if _STEALTH_LIB_OK:
+            try:
+                _stealth_sync(page)
+            except Exception:
+                pass
         page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-        page.goto(url, timeout=45000, wait_until="domcontentloaded")
-        # Wait for Cloudflare JS challenge to auto-resolve (up to 6 × 5s = 30s)
-        for _ in range(6):
-            title = page.title().lower()
+        # Use "commit" (not "domcontentloaded") — fires as soon as the server
+        # sends the first bytes.  "domcontentloaded" never fires when CF holds
+        # the connection open waiting for the JS challenge to run, causing a
+        # full 30-45 s timeout even though the server IS responding.
+        try:
+            page.goto(url, timeout=15000, wait_until="commit")
+        except Exception:
+            # Even "commit" timed out — server is completely unreachable/hung
+            return None
+        # Wait for Cloudflare JS challenge to auto-resolve (up to 8 × 5s = 40s)
+        for _ in range(8):
+            try:
+                title = page.title().lower()
+            except Exception:
+                break
             if any(m in title for m in ("just a moment", "checking your", "please wait", "one moment")):
                 page.wait_for_timeout(5000)
             else:
                 break
         # After CF resolves (or no CF), wait for JS to render page content.
-        # Try a soft networkidle (capped at 10s) — safe because we have a timeout.
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
         try:
             page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
-            pass   # fine if it times out — page.content() still gets what loaded
+            pass   # fine if it times out
         page.wait_for_timeout(3000)   # extra grace for React/SPA hydration
-        html = page.content()
+        try:
+            html = page.content()
+        except Exception:
+            return None
         if len(html) < 2000:
             return None
         snippet = html[:3000].lower()
@@ -629,8 +675,10 @@ def main():
         _pw_mgr  = sync_playwright().__enter__()
         pw_ctx   = _make_pw_context(_pw_mgr, proxy_url)
         pw_page  = pw_ctx.new_page()
+        _apply_stealth(pw_page)
         pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-        print(f"Playwright ready{' (+proxy)' if proxy_url else ''}\n")
+        print(f"Playwright ready{' (+proxy)' if proxy_url else ''}"
+              f"{' (playwright-stealth)' if _STEALTH_LIB_OK else ' (manual stealth)'}\n")
 
     all_results = []
     try:

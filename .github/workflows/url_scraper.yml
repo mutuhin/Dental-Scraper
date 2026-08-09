@@ -32,7 +32,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install requests beautifulsoup4 openpyxl lxml curl-cffi \
-                      playwright tqdm fake-useragent
+                      playwright playwright-stealth tqdm fake-useragent
 
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
