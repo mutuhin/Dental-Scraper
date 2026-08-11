@@ -143,11 +143,44 @@ def _init_pw_page(page) -> None:
     page.content, etc.), so we guard against hangs at the Playwright level:
       - auto-dismiss JS dialogs (alert/confirm/prompt) that would block goto()
         waiting for domcontentloaded forever
-      - set_default_timeout so content() and other ops respect PW_TIMEOUT too
+      - set_default_timeout so locator/wait ops respect PW_TIMEOUT
     """
     page.set_default_timeout(PW_TIMEOUT)
     page.on("dialog", lambda d: d.dismiss())
     page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+
+import threading as _threading  # noqa: E402 — used only by _safe_content
+
+def _safe_content(page, timeout_secs: float = 20.0) -> str:
+    """Return _safe_content(page) with a hard thread-level timeout.
+
+    _safe_content(page) has no built-in timeout and blocks forever when the
+    browser process freezes or the CDP channel breaks. This wrapper runs
+    content() in a daemon thread and raises RuntimeError if it hangs.
+    The daemon thread is abandoned on timeout (it cleans up when the
+    browser is eventually closed/recreated).
+    """
+    holder: list = [None]
+    err: list = [None]
+
+    def _go() -> None:
+        try:
+            holder[0] = page.content()  # intentional — this IS the raw call
+        except Exception as exc:
+            err[0] = exc
+
+    t = _threading.Thread(target=_go, daemon=True)
+    t.start()
+    t.join(timeout=timeout_secs)
+
+    if t.is_alive():
+        raise RuntimeError(
+            f"_safe_content(page) timed out after {timeout_secs:.0f}s — browser frozen"
+        )
+    if err[0]:
+        raise err[0]
+    return holder[0]
 
 
 # ── Row-range control (0-based index into the practices list) ──
@@ -1134,7 +1167,7 @@ def find_email_pw(website, page):
             url = website.rstrip("/") + path
             page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
             page.wait_for_timeout(1000 if IS_CI else 3000)
-            content = page.content()
+            content = _safe_content(page)
             # Search in raw HTML first
             m = re.search(
                 r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", content
@@ -2359,7 +2392,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                 log.info(f"   Doctor page (Playwright): {url}")
                 pw_page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                 pw_page.wait_for_timeout(1000 if IS_CI else 2500)
-                pw_html = pw_page.content()
+                pw_html = _safe_content(pw_page)
                 ts = BeautifulSoup(pw_html, "lxml")
                 secs = _parse_team_page_for_doctors(ts)
                 if len(secs) > best_section_count:
@@ -2379,7 +2412,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                 log.info(f"   Doctor page (Playwright base): {pw_url}")
                 pw_page.goto(pw_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                 pw_page.wait_for_timeout(1000 if IS_CI else 3000)
-                pw_html = pw_page.content()
+                pw_html = _safe_content(pw_page)
                 pw_soup = BeautifulSoup(pw_html, "lxml")
                 secs = _parse_team_page_for_doctors(pw_soup)
                 if len(secs) > best_section_count:
@@ -2619,7 +2652,7 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
                         log.info(f"   Doctor bio (PW {_pw_bio_uses}/{_PW_BIO_MAX}): {full_bio}")
                         pw_page.goto(full_bio, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                         pw_page.wait_for_timeout(1500 if IS_CI else 3000)
-                        _pw_bio_html = pw_page.content()
+                        _pw_bio_html = _safe_content(pw_page)
                         if len(_pw_bio_html) > 500:
                             _pw_bio_soup = BeautifulSoup(_pw_bio_html, "lxml")
                             # Upgrade name from PW-rendered bio page heading
@@ -3430,7 +3463,7 @@ def find_email_from_fb_about(fb_url, page):
     try:
         page.goto(about_url, timeout=15000 if IS_CI else 25000, wait_until="domcontentloaded")
         page.wait_for_timeout(1500 if IS_CI else 3000)
-        content = page.content()
+        content = _safe_content(page)
         m = re.search(
             r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", content
         )
@@ -3454,7 +3487,7 @@ def find_facebook_url_via_search(practice_name, city, state, pw_page):
     try:
         pw_page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         pw_page.wait_for_timeout(1000 if IS_CI else 2000)
-        content = pw_page.content()
+        content = _safe_content(pw_page)
         _FB_SKIP = ("share", "sharer", "login", "signup", "help", "policy",
                     "dialog", "tr.facebook", "l.facebook")
         for m in re.finditer(
@@ -3748,7 +3781,7 @@ def get_facebook_stats_pw(url, page):
         try:
             page.goto(_pw_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
             page.wait_for_timeout(2000 if IS_CI else 3000)
-            raw_content = page.content()
+            raw_content = _safe_content(page)
             followers = _parse_fb_followers(raw_content)
             if followers:
                 log.info(f"   FB Playwright hit → {followers} followers at {_pw_url}")
@@ -3906,7 +3939,7 @@ def get_instagram_stats_pw(url, page):
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(2000 if IS_CI else 4000)
-        content = page.content()
+        content = _safe_content(page)
         if _ig_is_login_wall(content):
             log.debug(f"   IG Playwright: login wall at {url}")
             return "Not Found", "Not Found"
@@ -4167,7 +4200,7 @@ def get_invisalign_tier_pw(practice_name, city, state, zip_code, page):
             except Exception:
                 pass
 
-        content = page.content()
+        content = _safe_content(page)
         name_words = [w for w in practice_name.lower().split() if len(w) > 3]
 
         # Search tier labels near the practice name
@@ -4434,12 +4467,12 @@ def scrape_practice(row, pw_page=None):
                         pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                         pw_page.wait_for_timeout(1000 if IS_CI else 2500)
                     try:
-                        pw_html = pw_page.content()
+                        pw_html = _safe_content(pw_page)
                     except Exception:
                         # Page still navigating (Cloudflare redirect chain) — wait longer
                         pw_page.wait_for_timeout(1500 if IS_CI else 3000)
                         try:
-                            pw_html = pw_page.content()
+                            pw_html = _safe_content(pw_page)
                         except Exception:
                             pw_html = ""
                     # Reject Cloudflare challenge pages — they have no real nav/content
@@ -4476,7 +4509,7 @@ def scrape_practice(row, pw_page=None):
                             except Exception:
                                 pass
                             try:
-                                pw_html = pw_page.content()
+                                pw_html = _safe_content(pw_page)
                             except Exception:
                                 pw_html = ""
                             if pw_html and len(pw_html) > 2000:
@@ -4745,7 +4778,7 @@ def scrape_practice(row, pw_page=None):
                         pw_page.goto(sub_url, timeout=PW_TIMEOUT,
                                      wait_until="domcontentloaded")
                         pw_page.wait_for_timeout(800 if IS_CI else 1500)
-                        _pw_html = pw_page.content()
+                        _pw_html = _safe_content(pw_page)
                         if len(_pw_html) > 500:
                             sub_html = _pw_html
                             _pw_sub_count[0] += 1
@@ -4899,7 +4932,7 @@ def scrape_practice(row, pw_page=None):
             try:
                 pw_page.goto(base_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                 pw_page.wait_for_timeout(1000 if IS_CI else 2500)
-                pw_html = pw_page.content()
+                pw_html = _safe_content(pw_page)
                 pw_soup = BeautifulSoup(pw_html, "lxml")
                 # Merge JS-rendered text into all_text
                 all_text += " " + extract_text(pw_html)
@@ -4975,7 +5008,7 @@ def scrape_practice(row, pw_page=None):
                     log.info(f"   Rendering service page (PW): {_svc_url}")
                     pw_page.goto(_svc_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
                     pw_page.wait_for_timeout(1000 if IS_CI else 2000)
-                    _pw_svc_html = pw_page.content()
+                    _pw_svc_html = _safe_content(pw_page)
                     all_text += " " + extract_text(_pw_svc_html)
                     _sub_counter[0] += 1
                     _cache(f"pw_svc_{_sub_counter[0]:02d}", _svc_url, _pw_svc_html)

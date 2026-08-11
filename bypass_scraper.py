@@ -354,7 +354,7 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
             pass   # fine if it times out
         page.wait_for_timeout(3000)   # extra grace for React/SPA hydration
         try:
-            html = page.content()
+            html = ds._safe_content(page, timeout_secs=20)
         except Exception:
             return None
         if len(html) < 2000:
