@@ -173,9 +173,9 @@ def load_proxies(path):
 
 
 def _next_proxy():
-    """Return a random working proxy or None."""
+    """Return the first working proxy in the pool (order matters — UK is first)."""
     available = [p for p in _proxy_pool if p not in _proxy_fail]
-    return random.choice(available) if available else None
+    return available[0] if available else None
 
 
 # ── Enhanced safe_get (monkey-patched over ds.safe_get) ───────────────────────
@@ -215,9 +215,9 @@ def _bypass_safe_get(url, retries=2):
                 continue
 
     # ── Strategy 2: curl_cffi + proxy ────────────────────────────────────────
+    # Proxies are ordered (UK first) — do NOT shuffle; geo-order is intentional.
     if _CFFI_OK and _proxy_pool:
         available = [p for p in _proxy_pool if p not in _proxy_fail]
-        random.shuffle(available)
         for proxy in available[:6]:
             profile = random.choice(_CFFI_PROFILES[:3])
             try:

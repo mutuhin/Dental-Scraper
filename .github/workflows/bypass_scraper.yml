@@ -43,8 +43,18 @@ jobs:
           playwright install chromium --with-deps
 
       - name: Write proxy file
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
         run: |
-          echo "http://${{ secrets.OXYLABS_USER }}:${{ secrets.OXYLABS_PASS }}@pr.oxylabs.io:7777" > proxies.txt
+          BASE="${OXYLABS_USER}"
+          if [[ "$BASE" != customer-* ]]; then
+            BASE="customer-${BASE}"
+          fi
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" > proxies.txt
+          echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          echo "http://${BASE}-cc-nl:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
 
       # ── mode: urls ────────────────────────────────────────────────────────
       - name: Run bypass (URLs mode)

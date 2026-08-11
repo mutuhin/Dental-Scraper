@@ -42,9 +42,22 @@ jobs:
           OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
           OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
         run: |
-          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" > proxies.txt
-          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@us-pr.oxylabs.io:10000" >> proxies.txt
-          echo "Proxy file written (credentials hidden)"
+          # Oxylabs country-code syntax: append -cc-XX to the username.
+          # Sites like Aspen Dental geo-block US IPs — UK proxy bypasses this.
+          # Ensure the username has the required customer- prefix.
+          BASE="${OXYLABS_USER}"
+          if [[ "$BASE" != customer-* ]]; then
+            BASE="customer-${BASE}"
+          fi
+          # UK first — Aspen Dental and many CF Enterprise sites allow UK traffic
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" > proxies.txt
+          # Germany as second option
+          echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          # Netherlands as third
+          echo "http://${BASE}-cc-nl:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          # Global rotating as last fallback
+          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          echo "Proxy file written (UK first, credentials hidden)"
 
       - name: Normalise URL list
         id: normalise
