@@ -51,9 +51,10 @@ jobs:
           if [[ "$BASE" != customer-* ]]; then
             BASE="customer-${BASE}"
           fi
-          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" > proxies.txt
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@mobile.oxylabs.io:7777" > proxies.txt
+          echo "http://${BASE}-cc-de:${OXYLABS_PASS}@mobile.oxylabs.io:7777" >> proxies.txt
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
-          echo "http://${BASE}-cc-nl:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
 
       # ── mode: urls ────────────────────────────────────────────────────────

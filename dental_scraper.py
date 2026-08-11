@@ -4390,16 +4390,35 @@ def scrape_practice(row, pw_page=None):
             urls_to_try = [base_url]
             for try_url in urls_to_try:
                 try:
-                    # Use "commit" in BYPASS_MODE: CF Enterprise holds the connection
-                    # open running its JS challenge, so "domcontentloaded" never fires
-                    # and times out after 30 s even though the server IS responding.
-                    # "commit" fires on first byte, letting us then wait for CF to solve.
-                    _pw_wait = "commit" if BYPASS_MODE else "domcontentloaded"
-                    try:
-                        pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until=_pw_wait)
-                    except Exception:
-                        pass   # commit/domcontentloaded timeout — still check content
-                    pw_page.wait_for_timeout(1000 if (IS_CI and not BYPASS_MODE) else 2500)
+                    # In BYPASS_MODE use "commit" so we don't block 30 s waiting for
+                    # domcontentloaded when CF holds the connection open.  After commit
+                    # we manually poll for CF to auto-solve (stealth + proxy should work).
+                    if BYPASS_MODE:
+                        try:
+                            pw_page.goto(try_url, timeout=15000, wait_until="commit")
+                        except Exception:
+                            pass   # even commit timed out — check what's there
+                        # Poll title: wait up to 40 s for CF challenge to resolve
+                        for _ in range(8):
+                            try:
+                                _cur_title = pw_page.title().lower()
+                            except Exception:
+                                pw_page.wait_for_timeout(3000)
+                                continue
+                            if any(m in _cur_title for m in
+                                   ("just a moment", "checking your", "please wait", "one moment")):
+                                pw_page.wait_for_timeout(5000)  # CF solving — keep waiting
+                            else:
+                                pw_page.wait_for_timeout(3000)  # let JS finish rendering
+                                break
+                        # Soft networkidle after challenge resolves
+                        try:
+                            pw_page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                    else:
+                        pw_page.goto(try_url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
+                        pw_page.wait_for_timeout(1000 if IS_CI else 2500)
                     try:
                         pw_html = pw_page.content()
                     except Exception:

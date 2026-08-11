@@ -49,15 +49,16 @@ jobs:
           if [[ "$BASE" != customer-* ]]; then
             BASE="customer-${BASE}"
           fi
-          # UK first — Aspen Dental and many CF Enterprise sites allow UK traffic
-          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" > proxies.txt
-          # Germany as second option
+          # Mobile proxies (real 4G/5G IPs) — virtually impossible to block.
+          # Put UK mobile first — Aspen Dental allows UK traffic.
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@mobile.oxylabs.io:7777" > proxies.txt
+          echo "http://${BASE}-cc-de:${OXYLABS_PASS}@mobile.oxylabs.io:7777" >> proxies.txt
+          # Residential UK/DE as fallback (in case mobile isn't in subscription)
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
-          # Netherlands as third
-          echo "http://${BASE}-cc-nl:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
-          # Global rotating as last fallback
+          # Global rotating as last resort
           echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
-          echo "Proxy file written (UK first, credentials hidden)"
+          echo "Proxy file written (UK mobile first, credentials hidden)"
 
       - name: Normalise URL list
         id: normalise

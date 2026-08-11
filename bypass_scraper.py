@@ -597,11 +597,28 @@ def _supplement_doctors(result, website, pw_context=None):
 
 # ── Scrape one practice with all bypass strategies ────────────────────────────
 
-def scrape_with_bypass(row, pw_page=None):
+def _is_empty_result(result):
+    """Return True when scrape_practice captured nothing useful."""
+    if not isinstance(result, dict):
+        return True
+    doc = str(result.get("scraped_doctor_names", "Not Found")).strip()
+    skip = str(result.get("skip_reason", "")).strip()
+    no_doc = doc in ("Not Found", "", "None", "N/A")
+    cf_blocked = "Bot Protection" in skip or "403" in skip or "Cloudflare" in skip
+    return no_doc and cf_blocked
+
+
+def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
     """
     Monkey-patch ds.safe_get, run the full scraper pipeline, restore original.
-    After the main pipeline, runs supplementary dental sub-page crawl when no
-    doctors were found (handles network/FQHC sites like clinicas.org).
+
+    Strategy:
+      1. Run scrape_practice with the proxy Playwright page.
+      2. If the site was CF-blocked and nothing was captured, retry the
+         Playwright section with a no-proxy stealth page (pw_page_noproxy).
+         Some CF Enterprise configs block known proxy ranges but pass
+         stealth-only headless browsers through a Turnstile challenge.
+      3. Supplementary sub-page crawl when doctors still not found.
     """
     global _orig_safe_get
     _orig_safe_get = ds.safe_get
@@ -610,6 +627,22 @@ def scrape_with_bypass(row, pw_page=None):
         result = ds.scrape_practice(row, pw_page=pw_page)
     finally:
         ds.safe_get = _orig_safe_get
+
+    # ── Retry with no-proxy stealth Playwright when proxy was blocked ─────────
+    if _is_empty_result(result) and pw_page_noproxy is not None:
+        print(f"  → Proxy blocked — retrying with no-proxy stealth Playwright…")
+        _orig_safe_get = ds.safe_get
+        ds.safe_get = _bypass_safe_get
+        try:
+            result2 = ds.scrape_practice(row, pw_page=pw_page_noproxy)
+        finally:
+            ds.safe_get = _orig_safe_get
+        # Use the no-proxy result only if it captured more
+        if not _is_empty_result(result2):
+            print(f"  → No-proxy stealth succeeded!")
+            result = result2
+        else:
+            print(f"  → No-proxy stealth also blocked — site requires real browser")
 
     # Supplementary pass: for network/FQHC sites where doctors are on a
     # separate dental-services page (not the main location/homepage)
@@ -666,26 +699,40 @@ def main():
     print()
 
     # ── Set up Playwright (one browser for all practices) ─────────────────────
-    pw_ctx  = None
-    pw_page = None
-    _pw_mgr = None
+    pw_ctx        = None   # proxy context (UK/mobile)
+    pw_ctx_plain  = None   # no-proxy stealth context (fallback)
+    pw_page       = None
+    pw_page_plain = None
+    _pw_mgr       = None
 
     if _PW_OK:
         proxy_url = _next_proxy()
         _pw_mgr  = sync_playwright().__enter__()
+
+        # Primary: proxy context (UK mobile/residential — bypasses geo-blocks)
         pw_ctx   = _make_pw_context(_pw_mgr, proxy_url)
         pw_page  = pw_ctx.new_page()
         _apply_stealth(pw_page)
         pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-        print(f"Playwright ready{' (+proxy)' if proxy_url else ''}"
-              f"{' (playwright-stealth)' if _STEALTH_LIB_OK else ' (manual stealth)'}\n")
+
+        # Fallback: no-proxy stealth context (for sites where proxy itself is blocked
+        # but the CF Turnstile challenge can be solved by the stealth browser alone)
+        pw_ctx_plain   = _make_pw_context(_pw_mgr, None)
+        pw_page_plain  = pw_ctx_plain.new_page()
+        _apply_stealth(pw_page_plain)
+        pw_page_plain.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+        stealth_label = "(playwright-stealth)" if _STEALTH_LIB_OK else "(manual stealth)"
+        print(f"Playwright ready — proxy: {proxy_url.split('@')[-1] if proxy_url else 'none'} "
+              f"{stealth_label}\n")
 
     all_results = []
     try:
         for i, row in enumerate(rows, 1):
             name = row.get("Practice Name") or row.get("Website")
             print(f"[{i}/{len(rows)}] {name}")
-            result = scrape_with_bypass(row, pw_page=pw_page)
+            result = scrape_with_bypass(row, pw_page=pw_page,
+                                        pw_page_noproxy=pw_page_plain)
             all_results.append((row, result))
             # Save checkpoint every 5 practices
             if i % 5 == 0 or i == len(rows):
@@ -693,7 +740,8 @@ def main():
                 print(f"  ✓ Checkpoint saved → {args.output}")
             time.sleep(1)
     finally:
-        if pw_ctx:  pw_ctx.close()
+        if pw_ctx:       pw_ctx.close()
+        if pw_ctx_plain: pw_ctx_plain.close()
         if _pw_mgr:
             try: _pw_mgr.__exit__(None, None, None)
             except Exception: pass
