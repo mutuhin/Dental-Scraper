@@ -75,10 +75,20 @@ except ImportError:
     print("         pip install playwright && playwright install chromium")
 
 try:
+    # playwright-stealth v1.x API
     from playwright_stealth import stealth_sync as _stealth_sync
     _STEALTH_LIB_OK = True
+    print("playwright-stealth: v1 API (stealth_sync)")
 except ImportError:
-    _STEALTH_LIB_OK = False   # falls back to manual stealth JS below
+    try:
+        # playwright-stealth v2.x renamed the function
+        from playwright_stealth import Stealth as _StealthClass
+        _stealth_sync = _StealthClass().apply_stealth_sync
+        _STEALTH_LIB_OK = True
+        print("playwright-stealth: v2 API (Stealth().apply_stealth_sync)")
+    except (ImportError, AttributeError) as _e:
+        _STEALTH_LIB_OK = False   # falls back to manual stealth JS below
+        print(f"playwright-stealth not available ({_e}) — using manual stealth JS")
 
 # ── Import dental_scraper functions ──────────────────────────────────────────
 
@@ -553,6 +563,74 @@ def _fetch_html_bypass(url, pw_context=None):
     return _pw_get_html(url, pw_context=pw_context)
 
 
+def _lookup_npi_dentists(city, state, street_address=""):
+    """
+    Query the public NPI registry for individual dentists (NPI-1) in a city/state.
+    Filters by practice address when street_address is provided.
+    Returns list of dicts: {name, credentials, specialty}.
+
+    NPI registry is a US government public API with no auth/rate limits.
+    Useful as fallback when the practice website is CF-blocked.
+    """
+    try:
+        import urllib.parse, json as _json
+        params = {
+            "version": "2.1",
+            "enumeration_type": "NPI-1",
+            "city": city,
+            "state": state,
+            "taxonomy_description": "dentist",
+            "limit": "50",
+        }
+        url = "https://npiregistry.cms.hhs.gov/api/?" + urllib.parse.urlencode(params)
+        resp = std_requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            return []
+
+        doctors = []
+        norm_street = street_address.lower().replace(",", "").replace(".", "").replace("  ", " ").strip()
+
+        for r in results:
+            basic = r.get("basic", {})
+            first = basic.get("first_name", "").strip()
+            last  = basic.get("last_name", "").strip()
+            cred  = basic.get("credential", "").strip()
+            if not first or not last:
+                continue
+
+            # Try to match practice address — filter dentists at this specific location
+            if norm_street:
+                addrs = r.get("addresses", [])
+                matched = False
+                for a in addrs:
+                    a1 = a.get("address_1", "").lower().replace(",", "").replace(".", "").strip()
+                    if a1 and any(part in a1 for part in norm_street.split() if len(part) > 3):
+                        matched = True
+                        break
+                if not matched:
+                    continue
+
+            spec = ""
+            taxs = r.get("taxonomies", [])
+            if taxs:
+                spec = taxs[0].get("desc", "")
+                if spec.lower() == "dentist":
+                    spec = ""   # too generic; skip obvious default
+
+            name = f"Dr. {first.title()} {last.title()}"
+            doctors.append({"name": name, "credentials": cred, "specialty": spec})
+
+        return doctors
+
+    except Exception as e:
+        print(f"  → NPI lookup error: {e}")
+        return []
+
+
 def _supplement_doctors(result, website, pw_context=None):
     """
     When the main scrape found no doctors, fetch dental sub-pages and extract
@@ -650,6 +728,30 @@ def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
     if website and isinstance(result, dict):
         pw_context = pw_page.context if pw_page is not None else None
         _supplement_doctors(result, website, pw_context=pw_context)
+
+    # ── NPI registry fallback when website is completely inaccessible ─────────
+    # The NPI registry is a US government public API (no bot protection, no auth).
+    # When all website-based methods fail we query it for individual dentists
+    # (NPI-1) at this practice address to recover doctor names and credentials.
+    if isinstance(result, dict):
+        doc_val = str(result.get("scraped_doctor_names", "Not Found")).strip()
+        still_no_doctors = doc_val in ("Not Found", "", "None", "N/A")
+        if still_no_doctors:
+            city    = row.get("City",  "")
+            state   = row.get("State", "")
+            address = row.get("Address", row.get("Street Address", ""))
+            if city and state:
+                print(f"  → Trying NPI registry fallback for {city}, {state}…")
+                npi_docs = _lookup_npi_dentists(city, state, street_address=address)
+                if npi_docs:
+                    result["doctors"] = npi_docs
+                    result["scraped_doctor_names"] = ", ".join(d["name"] for d in npi_docs)
+                    print(f"  → NPI registry found {len(npi_docs)} doctor(s): "
+                          f"{result['scraped_doctor_names']}")
+                    # Mark source so downstream knows this came from NPI, not the website
+                    result["npi_doctors"] = True
+                else:
+                    print(f"  → NPI registry: no matching dentists at this address")
 
     return result
 
