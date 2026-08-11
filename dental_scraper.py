@@ -136,6 +136,20 @@ def _alarm_handler(signum, frame):
     raise _PracticeTimeout()
 
 
+def _init_pw_page(page) -> None:
+    """Apply safety handlers to every new Playwright Page.
+
+    SIGALRM cannot interrupt Playwright's C-level blocking calls (page.goto,
+    page.content, etc.), so we guard against hangs at the Playwright level:
+      - auto-dismiss JS dialogs (alert/confirm/prompt) that would block goto()
+        waiting for domcontentloaded forever
+      - set_default_timeout so content() and other ops respect PW_TIMEOUT too
+    """
+    page.set_default_timeout(PW_TIMEOUT)
+    page.on("dialog", lambda d: d.dismiss())
+    page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+
 # ── Row-range control (0-based index into the practices list) ──
 # Examples:
 #   Rows  1-10 : START_IDX=0,  END_IDX=10
@@ -5622,7 +5636,7 @@ def main():
             user_agent=HEADERS["User-Agent"],
         )
         pw_page = pw_context.new_page()
-        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+        _init_pw_page(pw_page)
 
     try:
         for i, practice in enumerate(practices, 1):
@@ -5680,7 +5694,7 @@ def main():
                         pass
                     try:
                         pw_page = pw_context.new_page()
-                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                        _init_pw_page(pw_page)
                     except Exception:
                         pass
 
@@ -5693,7 +5707,7 @@ def main():
                         if pw_page is None or pw_page.is_closed():
                             log.warning("  Playwright page died — reopening…")
                             pw_page = pw_context.new_page()
-                            pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                            _init_pw_page(pw_page)
                     except Exception:
                         try:
                             log.warning("  Playwright context dead — relaunching browser…")
@@ -5708,7 +5722,7 @@ def main():
                             user_agent=HEADERS["User-Agent"],
                         )
                         pw_page = pw_context.new_page()
-                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                        _init_pw_page(pw_page)
 
             finally:
                 # Always cancel the alarm so the next practice starts with a fresh timer
@@ -5720,7 +5734,7 @@ def main():
                     log.warning("  Playwright page dead after practice — reopening for next…")
                     try:
                         pw_page = pw_context.new_page()
-                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                        _init_pw_page(pw_page)
                     except Exception:
                         try:
                             pw_context.close()
@@ -5734,7 +5748,7 @@ def main():
                             user_agent=HEADERS["User-Agent"],
                         )
                         pw_page = pw_context.new_page()
-                        pw_page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+                        _init_pw_page(pw_page)
 
             all_results.append((practice, scraped))
 
