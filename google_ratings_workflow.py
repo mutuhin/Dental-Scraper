@@ -167,7 +167,7 @@ def _oxylabs_serp_rating(practice_name: str, city: str, state: str) -> tuple:
             "https://realtime.oxylabs.io/v1/queries",
             auth=(_OXY_USER, _OXY_PASS),
             json=payload,
-            timeout=60,
+            timeout=30,   # 30s max — 403 plan-not-included returns instantly
         )
         if resp.status_code == 403:
             log.warning("  Oxylabs SERP API: 403 Forbidden — plan may not include SERP Scraper API")
@@ -306,8 +306,12 @@ def launch_playwright():
     _pw = sync_playwright().__enter__()
 
     if IS_CI:
-        _proxy_label = f"Oxylabs proxy ({_OXY_USER})" if _USE_PROXY else "direct GitHub Actions IP"
-        log.info(f"Launching headless Playwright ({_proxy_label})…")
+        # Playwright runs WITHOUT proxy in CI. curl_cffi (Method 3a) handles the
+        # proxy-based Google fetch fast. Playwright-through-proxy is 3-5x slower per
+        # navigation and Google still detects the browser fingerprint, so it adds
+        # latency without improving hit rate. Without proxy, Playwright fails fast
+        # on CAPTCHA, preserving the ~60-minute batch runtime.
+        log.info("Launching headless Playwright (direct — proxy handled by curl_cffi)…")
         browser = _pw.chromium.launch(
             headless=True,
             args=[
@@ -325,7 +329,6 @@ def launch_playwright():
             geolocation={"latitude": 40.7128, "longitude": -74.0060},
             permissions=["geolocation"],
             user_agent=random.choice(_g._USER_AGENTS),
-            proxy=_PW_PROXY,   # routes through Oxylabs residential proxy when available
         )
         _g.apply_stealth(ctx)
         page = ctx.new_page()
