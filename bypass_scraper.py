@@ -1099,6 +1099,68 @@ def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
             else:
                 print(f"  → Skyvern: could not load page")
 
+    # ── Sub-page hint: if the original input URL was a sub-page (team, about,
+    # services, etc.), fetch it now so its content supplements what the homepage
+    # scrape found.  This captures doctors listed only on the team page, or
+    # service keywords that only appear on a dedicated services page.
+    _extra_sub = row.get("_extra_sub_url", "")
+    if _extra_sub and isinstance(result, dict):
+        try:
+            from bs4 import BeautifulSoup as _BS4
+            _sub_html = ""
+            # Try Playwright first (handles JS-rendered pages)
+            if pw_page is not None:
+                try:
+                    pw_page.goto(_extra_sub, timeout=30000, wait_until="domcontentloaded")
+                    pw_page.wait_for_timeout(2000)
+                    _sub_html = ds._safe_content(pw_page)
+                except Exception:
+                    pass
+            # Fallback: bypass safe_get (proxy requests)
+            if not _sub_html:
+                _sr = _bypass_safe_get(_extra_sub)
+                if _sr:
+                    _sub_html = _sr.text
+            if _sub_html and len(_sub_html) > 500:
+                _sub_text = ds.extract_text(_sub_html)
+                _sub_soup = _BS4(_sub_html, "lxml")
+                print(f"  → Sub-page hint scraped: {_extra_sub} ({len(_sub_text)} chars)")
+                # Supplement doctors if still missing
+                _cur_doc = str(result.get("scraped_doctor_names", "Not Found")).strip()
+                if _cur_doc in ("Not Found", "", "None", "N/A"):
+                    _sub_docs, _ = ds.scrape_doctors_full(
+                        _sub_soup, row.get("Website", ""), _sub_text, pw_page=None
+                    )
+                    if _sub_docs:
+                        result["doctors"] = _sub_docs
+                        result["scraped_doctor_names"] = ", ".join(
+                            d["name"] for d in _sub_docs
+                        )
+                        print(f"  → Sub-page doctors: {result['scraped_doctor_names']}")
+                # Supplement services from sub-page text
+                from dental_scraper import SERVICE_KEYWORDS, count_keyword_capped
+                _svc_keys = [
+                    "invisalign", "clear_aligners", "veneers", "implants",
+                    "smile_makeovers", "whitening", "sedation", "holistic",
+                    "cancer_screening",
+                ]
+                _cat_map = {
+                    "Invisalign": "invisalign", "Clear Aligners": "clear_aligners",
+                    "Veneers": "veneers", "Implants": "implants",
+                    "Smile Makeovers": "smile_makeovers", "Teeth Whitening": "whitening",
+                    "Sedation Dentistry": "sedation", "Holistic Dentistry": "holistic",
+                    "Cancer Screening": "cancer_screening",
+                }
+                for kw, cat in SERVICE_KEYWORDS.items():
+                    if cat in _cat_map:
+                        _fk = _cat_map[cat]
+                        _cur = result.get(_fk, 0)
+                        _new = count_keyword_capped(_sub_text, kw, cap=5)
+                        if _new > (_cur or 0):
+                            result[_fk] = _new
+        except Exception as _sub_e:
+            print(f"  → Sub-page hint error: {_sub_e}")
+
     # Supplementary pass: for network/FQHC sites where doctors are on a
     # separate dental-services page (not the main location/homepage)
     website = row.get("Website", "")
@@ -1160,10 +1222,22 @@ def main():
         for i, url in enumerate(args.urls, 1):
             if not url.startswith("http"):
                 url = "https://" + url
-            rows.append({
-                "Index": i, "Practice Name": url,
-                "Website": url, "City": "", "State": "", "Zip": "",
-            })
+            # Strip path/query/fragment so scrape_practice() always starts from the
+            # homepage — sub-page or UTM-param URLs only contain partial site content
+            # and miss services, tech, and social links that live on the homepage.
+            from urllib.parse import urlparse as _urlparse
+            _p = _urlparse(url)
+            homepage = f"{_p.scheme}://{_p.netloc}/"
+            practice_label = _p.netloc.replace("www.", "")  # human-readable name fallback
+            row_entry = {
+                "Index": i, "Practice Name": practice_label,
+                "Website": homepage, "City": "", "State": "", "Zip": "",
+            }
+            # If the original URL is a sub-page (has a meaningful path), keep it
+            # as a hint so the bypass scraper also fetches it for doctor/team data.
+            if _p.path and _p.path not in ("/", ""):
+                row_entry["_extra_sub_url"] = url
+            rows.append(row_entry)
     else:
         rows = load_blocked_from_batch(args.batch)
         if not rows:
