@@ -65,12 +65,17 @@ GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "") or _g.GOOGLE
 
 # Oxylabs rotating proxy — routes Playwright through a real residential/DC IP
 # so GitHub Actions IPs don't get CAPTCHA-blocked by Google.
-_OXY_USER = os.environ.get("OXYLABS_USER", "")
-_OXY_PASS = os.environ.get("OXYLABS_PASS", "")
+_OXY_USER_RAW = os.environ.get("OXYLABS_USER", "")
+_OXY_PASS     = os.environ.get("OXYLABS_PASS", "")
+# Oxylabs requires the "customer-" prefix on the username
+_OXY_USER = (
+    _OXY_USER_RAW if _OXY_USER_RAW.startswith("customer-")
+    else f"customer-{_OXY_USER_RAW}"
+) if _OXY_USER_RAW else ""
 _USE_PROXY = bool(_OXY_USER and _OXY_PASS)
-_PROXY_SERVER = "http://pr.oxylabs.io:7777"
+_PROXY_SERVER = "pr.oxylabs.io:7777"
 _PW_PROXY = {
-    "server":   _PROXY_SERVER,
+    "server":   f"http://{_PROXY_SERVER}",
     "username": _OXY_USER,
     "password": _OXY_PASS,
 } if _USE_PROXY else None
@@ -89,8 +94,8 @@ if IS_CI:
 
 # ── curl_cffi Google search (proxy-aware, no full browser needed) ─────────────
 _CFFI_PROXIES = {
-    "http":  f"http://{_OXY_USER}:{_OXY_PASS}@pr.oxylabs.io:7777",
-    "https": f"http://{_OXY_USER}:{_OXY_PASS}@pr.oxylabs.io:7777",
+    "http":  f"http://{_OXY_USER}:{_OXY_PASS}@{_PROXY_SERVER}",
+    "https": f"http://{_OXY_USER}:{_OXY_PASS}@{_PROXY_SERVER}",
 } if _USE_PROXY else {}
 
 
@@ -111,7 +116,7 @@ def _cffi_fetch_rating(practice_name: str, city: str, state: str,
 
     for query in queries:
         url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=us&num=5&pws=0"
-        for impersonate in ("chrome120", "chrome110", "chrome107"):
+        for impersonate in ("chrome136", "chrome124", "chrome110"):
             try:
                 resp = _cffi_requests.get(
                     url,
@@ -301,7 +306,8 @@ def launch_playwright():
     _pw = sync_playwright().__enter__()
 
     if IS_CI:
-        log.info("Launching headless Playwright (no proxy — direct GitHub Actions IP)…")
+        _proxy_label = f"Oxylabs proxy ({_OXY_USER})" if _USE_PROXY else "direct GitHub Actions IP"
+        log.info(f"Launching headless Playwright ({_proxy_label})…")
         browser = _pw.chromium.launch(
             headless=True,
             args=[
@@ -319,6 +325,7 @@ def launch_playwright():
             geolocation={"latitude": 40.7128, "longitude": -74.0060},
             permissions=["geolocation"],
             user_agent=random.choice(_g._USER_AGENTS),
+            proxy=_PW_PROXY,   # routes through Oxylabs residential proxy when available
         )
         _g.apply_stealth(ctx)
         page = ctx.new_page()
