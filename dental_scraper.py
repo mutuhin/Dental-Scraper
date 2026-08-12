@@ -3597,26 +3597,127 @@ def find_hygienists(text):
 # GOOGLE & YELP RATINGS — requests-based
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_google_rating_html(html: str) -> tuple:
+    """
+    Extract (rating, review_count) from a Google search result page HTML.
+    Tries JSON-LD, structured data attributes, and text patterns.
+    """
+    # ── 1. JSON-LD aggregateRating ────────────────────────────────────────────
+    for m in re.finditer(r'\{[^{}]*?"@type"\s*:\s*"[^"]*Business[^"]*"[^{}]*?\}', html, re.S):
+        try:
+            obj = json.loads(m.group(0))
+            ar = obj.get("aggregateRating", {})
+            rv = str(ar.get("ratingValue", ar.get("rating", "")))
+            rc = str(ar.get("reviewCount", ar.get("ratingCount", "")))
+            if rv:
+                return rv, rc or "Not Found"
+        except Exception:
+            pass
+
+    # ── 2. Google's structured data attributes on search result page ──────────
+    # Google embeds "4.5" in <span data-value="4.5"> or aria-label="Rated 4.5 out of 5"
+    m2 = re.search(r'aria-label="Rated?\s*([\d.]+)\s*out\s*of\s*5', html, re.I)
+    if m2:
+        rv = m2.group(1)
+        # count nearby
+        mc = re.search(r'(\d[\d,]+)\s*(?:Google\s*)?review', html[max(0, m2.start()-200):m2.end()+300], re.I)
+        rc = mc.group(1).replace(",", "") if mc else "Not Found"
+        return rv, rc
+
+    m2b = re.search(r'data-value=["\']([1-5]\.\d)["\']', html)
+    if m2b:
+        rv = m2b.group(1)
+        mc = re.search(r'(\d[\d,]+)\s*(?:Google\s*)?review', html, re.I)
+        rc = mc.group(1).replace(",", "") if mc else "Not Found"
+        return rv, rc
+
+    # ── 3. itemprop / microdata ───────────────────────────────────────────────
+    m3 = re.search(r'itemprop=["\']ratingValue["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+    if not m3:
+        m3 = re.search(r'content=["\']([^"\']+)["\'][^>]*itemprop=["\']ratingValue["\']', html, re.I)
+    if m3:
+        rv = m3.group(1).strip()
+        m3c = re.search(r'itemprop=["\']reviewCount["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+        rc = m3c.group(1) if m3c else "Not Found"
+        return rv, rc
+
+    # ── 4. Text patterns (plain-text Google snippet) ──────────────────────────
+    text = extract_text(html)
+
+    # "4.5 · 123 Google reviews" or "4.5 (123)" or "4.5 stars · 123 reviews"
+    m4 = re.search(
+        r'\b([1-5]\.[0-9])\s*(?:stars?\s*)?[·\(·•\-]?\s*(\d[\d,]*)\s*(?:Google\s*)?reviews?',
+        text, re.I
+    )
+    if m4:
+        return m4.group(1), m4.group(2).replace(",", "")
+
+    # Separate rating and count
+    rating_m = re.search(r'\b([1-5]\.[0-9])\b', text)
+    count_m  = re.search(r'(\d{1,6})\s*(?:Google\s*)?reviews?', text, re.I)
+    if rating_m or count_m:
+        return (
+            rating_m.group(1) if rating_m else "Not Found",
+            count_m.group(1).replace(",", "") if count_m else "Not Found",
+        )
+
+    return "Not Found", "Not Found"
+
+
 def google_search_rating(practice_name, city, state):
     """
-    Search Google for the practice and extract star rating + review count
-    from search snippet text.
+    Search Google for the practice and extract star rating + review count.
+    Strategy:
+      1. curl_cffi + Oxylabs residential proxy (stealth, bypasses Google bot-detection)
+      2. Plain requests fallback (works locally; blocked in CI but kept as safety net)
     Returns (rating_str, count_str).
     """
-    query = f"{practice_name} {city} {state} dentist reviews"
-    url   = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
+    query = f"{practice_name} {city} {state} dentist"
+    url   = f"https://www.google.com/search?q={quote_plus(query)}&hl=en&gl=us&num=5"
     time.sleep(DELAY_SEC)
+
+    _ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    _hdrs = {
+        "User-Agent":      _ua,
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://www.google.com/",
+        "sec-fetch-site":  "same-origin",
+        "sec-fetch-mode":  "navigate",
+        "sec-fetch-dest":  "document",
+    }
+
+    # ── Strategy 1: curl_cffi + rotating Oxylabs proxy ───────────────────────
+    if _CFFI_AVAILABLE:
+        for _prof in ("chrome136", "chrome124", "safari260"):
+            try:
+                _px = _fresh_social_proxy()
+                sess = cffi_requests.Session(impersonate=_prof)
+                r = sess.get(url, headers=_hdrs, proxies=_px, timeout=25, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 500:
+                    # Check not a consent/CAPTCHA wall
+                    lc = r.text.lower()
+                    if "consent.google.com" in lc or 'id="captcha"' in lc or "recaptcha" in lc:
+                        log.debug(f"   Google: consent/CAPTCHA wall ({_prof})")
+                        continue
+                    rating, count = _parse_google_rating_html(r.text)
+                    if rating != "Not Found":
+                        log.info(f"   Google curl_cffi hit → {rating} ({count} reviews)")
+                        return rating, count
+                    log.debug(f"   Google: no rating parsed from response ({_prof})")
+                else:
+                    log.debug(f"   Google HTTP {r.status_code} ({_prof})")
+            except Exception as _e:
+                log.debug(f"   Google curl_cffi error ({_prof}): {_e}")
+
+    # ── Strategy 2: plain requests (local dev; blocked in CI) ────────────────
     r = safe_get(url)
-    if not r:
-        return "Not Found", "Not Found"
-    text = extract_text(r.text)
+    if r and r.status_code == 200:
+        rating, count = _parse_google_rating_html(r.text)
+        if rating != "Not Found":
+            return rating, count
 
-    rating_match = re.search(r"\b([45]\.\d)\b", text)
-    count_match  = re.search(r"(\d{1,5})\s*(?:google\s*)?reviews?", text)
-
-    rating = rating_match.group(1) if rating_match else "Not Found"
-    count  = count_match.group(1)  if count_match  else "Not Found"
-    return rating, count
+    return "Not Found", "Not Found"
 
 
 def yelp_search_rating(practice_name, city, state):
