@@ -156,6 +156,187 @@ _CHALLENGE_MARKERS = (
     "access denied", "please enable cookies", "enable javascript and cookies",
 )
 
+# ── Skyvern cloud-browser integration ────────────────────────────────────────
+# Skyvern runs real Chrome with UK residential IPs that are not in Cloudflare's
+# blocklist.  Set SKYVERN_API_KEY (GitHub Secret) to enable this fallback.
+_SKYVERN_API = "https://api.skyvern.com/v1"
+_SKYVERN_KEY = os.environ.get("SKYVERN_API_KEY", "")
+
+
+def _skyvern_session(proxy_location="RESIDENTIAL_GB"):
+    """Create a Skyvern browser session; return session_id or None."""
+    if not _SKYVERN_KEY:
+        return None
+    try:
+        r = std_requests.post(
+            f"{_SKYVERN_API}/browser-sessions",
+            json={"proxy_location": proxy_location, "timeout": 10},
+            headers={"x-api-key": _SKYVERN_KEY},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json().get("session_id")
+    except Exception as e:
+        print(f"  [Skyvern] session create failed: {e}")
+        return None
+
+
+def _skyvern_close(session_id):
+    """Close a Skyvern session (best-effort)."""
+    if not session_id:
+        return
+    try:
+        std_requests.delete(
+            f"{_SKYVERN_API}/browser-sessions/{session_id}",
+            headers={"x-api-key": _SKYVERN_KEY},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _skyvern_navigate(session_id, url, timeout_ms=60000):
+    """Navigate Skyvern browser to url; return True on success."""
+    try:
+        r = std_requests.post(
+            f"{_SKYVERN_API}/browser-sessions/{session_id}/navigate",
+            json={"url": url, "wait_until": "networkidle", "timeout": timeout_ms},
+            headers={"x-api-key": _SKYVERN_KEY},
+            timeout=timeout_ms / 1000 + 30,
+        )
+        return r.status_code < 400
+    except Exception as e:
+        print(f"  [Skyvern] navigate error: {e}")
+        return False
+
+
+def _skyvern_get_text(session_id):
+    """Return visible body text from the current Skyvern page, or ''."""
+    try:
+        r = std_requests.post(
+            f"{_SKYVERN_API}/browser-sessions/{session_id}/evaluate",
+            json={"expression": "document.body.innerText"},
+            headers={"x-api-key": _SKYVERN_KEY},
+            timeout=30,
+        )
+        result = r.json()
+        return str(result.get("result", ""))
+    except Exception:
+        return ""
+
+
+def _skyvern_get_html(session_id):
+    """Return full page HTML from the current Skyvern page, or ''."""
+    try:
+        r = std_requests.post(
+            f"{_SKYVERN_API}/browser-sessions/{session_id}/evaluate",
+            json={"expression": "document.documentElement.outerHTML"},
+            headers={"x-api-key": _SKYVERN_KEY},
+            timeout=30,
+        )
+        result = r.json()
+        return str(result.get("result", ""))
+    except Exception:
+        return ""
+
+
+def _skyvern_get_page_links(session_id, base_url):
+    """Return same-domain href links found on current Skyvern page."""
+    try:
+        r = std_requests.post(
+            f"{_SKYVERN_API}/browser-sessions/{session_id}/evaluate",
+            json={"expression": (
+                "JSON.stringify([...new Set("
+                "  Array.from(document.querySelectorAll('a[href]'))"
+                "  .map(a => a.href)"
+                "  .filter(h => h.startsWith('" + base_url + "'))"
+                ")])"
+            )},
+            headers={"x-api-key": _SKYVERN_KEY},
+            timeout=20,
+        )
+        import json as _json
+        raw = r.json().get("result", "[]")
+        return _json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+
+# Sub-page keywords that likely contain doctor / team / service data
+_SUB_PAGE_KW = re.compile(
+    r"(doctor|team|staff|provider|dentist|about|service|treatment|"
+    r"procedure|implant|cosmetic|specialist|meet|our-dentist)",
+    re.I,
+)
+
+
+def _skyvern_full_scrape(url):
+    """
+    Use Skyvern cloud browser (UK residential IP) to:
+      1. Load the main URL
+      2. Extract ALL visible text + HTML
+      3. Find same-domain sub-pages with dental/doctor keywords
+      4. Load up to 5 sub-pages and collect their text too
+    Returns dict: {main_html, main_text, sub_texts: [(url, text), ...]}
+    or None on failure.
+    """
+    if not _SKYVERN_KEY:
+        return None
+
+    print(f"  [Skyvern] Starting cloud browser session (UK residential)…")
+    session_id = _skyvern_session()
+    if not session_id:
+        return None
+
+    try:
+        # ── Load main page ────────────────────────────────────────────────────
+        print(f"  [Skyvern] Navigating → {url[:80]}")
+        ok = _skyvern_navigate(session_id, url, timeout_ms=60000)
+        if not ok:
+            print(f"  [Skyvern] Navigation failed")
+            return None
+
+        main_html = _skyvern_get_html(session_id)
+        main_text = _skyvern_get_text(session_id)
+
+        if len(main_text) < 200:
+            print(f"  [Skyvern] Page appears empty ({len(main_text)} chars)")
+            return None
+
+        print(f"  [Skyvern] Main page: {len(main_text):,} chars of text")
+
+        # ── Discover sub-pages ────────────────────────────────────────────────
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        all_links = _skyvern_get_page_links(session_id, base)
+        sub_links = [
+            lnk for lnk in all_links
+            if lnk.rstrip("/") != url.rstrip("/")
+            and _SUB_PAGE_KW.search(lnk)
+        ][:5]  # cap at 5 sub-pages
+
+        # ── Load sub-pages ────────────────────────────────────────────────────
+        sub_texts = []
+        for sub_url in sub_links:
+            print(f"  [Skyvern] Sub-page → {sub_url[:80]}")
+            ok2 = _skyvern_navigate(session_id, sub_url, timeout_ms=30000)
+            if not ok2:
+                continue
+            txt = _skyvern_get_text(session_id)
+            if txt and len(txt) > 100:
+                sub_texts.append((sub_url, txt))
+                print(f"    {len(txt):,} chars")
+
+        return {
+            "main_html": main_html,
+            "main_text": main_text,
+            "sub_texts": sub_texts,
+        }
+
+    finally:
+        _skyvern_close(session_id)
+        print(f"  [Skyvern] Session closed")
+
 
 def _is_challenge_html(r):
     """Return True if the response is a bot-challenge page regardless of status code."""
@@ -559,8 +740,22 @@ def _fetch_html_bypass(url, pw_context=None):
                     break  # hard block — skip remaining profiles
             except Exception:
                 continue
-    # Fall back to Playwright stealth
-    return _pw_get_html(url, pw_context=pw_context)
+    # Playwright stealth
+    html = _pw_get_html(url, pw_context=pw_context)
+    if html:
+        return html
+    # Skyvern cloud browser (UK residential) as final fallback
+    if _SKYVERN_KEY:
+        session_id = _skyvern_session()
+        if session_id:
+            try:
+                if _skyvern_navigate(session_id, url, timeout_ms=45000):
+                    sk_html = _skyvern_get_html(session_id)
+                    if sk_html and len(sk_html) > 2000:
+                        return sk_html
+            finally:
+                _skyvern_close(session_id)
+    return None
 
 
 def _lookup_npi_dentists(city, state, street_address=""):
@@ -673,6 +868,147 @@ def _supplement_doctors(result, website, pw_context=None):
         print(f"  → Supplementary crawl: still no doctors found")
 
 
+def _parse_skyvern_data(scraped_data, result):
+    """
+    Parse the full-text dump from Skyvern into the result dict.
+
+    Extracts from ALL collected text (main page + sub-pages):
+      - Doctor names (Dr. First Last patterns)
+      - Phone numbers
+      - Services keywords
+      - Rating / review count
+    Updates `result` in-place; returns True if any useful data was found.
+    """
+    from bs4 import BeautifulSoup
+
+    all_text_parts = [scraped_data.get("main_text", "")]
+    for _, txt in scraped_data.get("sub_texts", []):
+        all_text_parts.append(txt)
+    full_text = "\n".join(all_text_parts)
+
+    if not full_text.strip():
+        return False
+
+    improved = False
+
+    # ── Doctor names ──────────────────────────────────────────────────────────
+    doc_val = str(result.get("scraped_doctor_names", "Not Found")).strip()
+    if doc_val in ("Not Found", "", "None", "N/A"):
+        # Pattern: Dr. FirstName LastName (optional credentials)
+        dr_pattern = re.compile(
+            r"Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][A-Za-z'\-]+)"
+            r"(?:\s*,?\s*(DDS|DMD|DDS/DMD|DMD/DDS|MD|BDS|MSD|MS|PhD|FAGD|ABGD|FICOI|AACD|FICCDE)"
+            r"(?:[,\s/]+(?:DDS|DMD|DDS/DMD|DMD/DDS|MD|BDS|MSD|MS|PhD|FAGD|ABGD|FICOI|AACD))*)?",
+            re.I,
+        )
+        found_doctors = {}
+        for m in dr_pattern.finditer(full_text):
+            name = "Dr. " + m.group(1).strip()
+            cred = (m.group(2) or "").strip().upper()
+            if name not in found_doctors:
+                found_doctors[name] = cred
+
+        # Also look for name patterns following "Owner", "Associate", specialty titles
+        role_pattern = re.compile(
+            r"(Dr\.?\s+[A-Z][a-z]+\s+[A-Z][A-Za-z'\-]+)\s*\n?\s*"
+            r"(Owner|Associate|Endodontist|Orthodontist|Oral Surgeon|Periodontist|"
+            r"Pediatric|General Dentist|Prosthodontist|Cosmetic|Family Dentist)",
+            re.I,
+        )
+        for m in role_pattern.finditer(full_text):
+            name = m.group(1).strip()
+            if not name.startswith("Dr."):
+                name = "Dr. " + name.split("Dr.")[-1].strip()
+            if name not in found_doctors:
+                found_doctors[name] = ""
+
+        if found_doctors:
+            doctors_list = [
+                {"name": n, "credentials": c, "specialty": ""}
+                for n, c in found_doctors.items()
+            ]
+            result["doctors"] = doctors_list
+            result["scraped_doctor_names"] = ", ".join(found_doctors.keys())
+            print(f"  [Skyvern] Doctors found: {result['scraped_doctor_names']}")
+            improved = True
+
+    # ── Phone ─────────────────────────────────────────────────────────────────
+    phone_val = str(result.get("phone", "Not Found")).strip()
+    if phone_val in ("Not Found", "", "None"):
+        phone_m = re.search(
+            r"\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}", full_text
+        )
+        if phone_m:
+            result["phone"] = phone_m.group(0).strip()
+            improved = True
+
+    # ── Rating ────────────────────────────────────────────────────────────────
+    rating_val = str(result.get("google_rating", "Not Found")).strip()
+    if rating_val in ("Not Found", "", "None"):
+        # Look for JSON-LD in main HTML first
+        main_html = scraped_data.get("main_html", "")
+        if main_html:
+            import json as _json
+            for script_match in re.finditer(
+                r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+                main_html, re.S | re.I
+            ):
+                try:
+                    ld = _json.loads(script_match.group(1))
+                    ag = ld.get("aggregateRating") or {}
+                    rv = ag.get("ratingValue") or ld.get("ratingValue")
+                    rc = ag.get("reviewCount") or ag.get("ratingCount")
+                    if rv:
+                        result["google_rating"] = str(rv)
+                        improved = True
+                    if rc:
+                        result["total_google_reviews"] = str(rc)
+                        improved = True
+                    if rv:
+                        break
+                except Exception:
+                    pass
+
+        # Plain-text fallback: "4.4 stars" or "4.4 out of 5"
+        if result.get("google_rating", "Not Found") in ("Not Found", "", "None"):
+            rat_m = re.search(r"(\d\.\d)\s*(?:stars?|out of 5|★)", full_text, re.I)
+            if rat_m:
+                result["google_rating"] = rat_m.group(1)
+                improved = True
+
+    # ── Services ─────────────────────────────────────────────────────────────
+    svc_val = str(result.get("services", "Not Found")).strip()
+    if svc_val in ("Not Found", "", "None"):
+        svc_keywords = [
+            "Dentures", "Dental implants", "Dental cleaning", "Root canal",
+            "Teeth whitening", "Invisalign", "Clear aligners", "Crowns",
+            "Bridges", "Veneers", "Extractions", "Emergency dental",
+            "Sedation", "Pediatric", "Orthodontics", "Oral surgery",
+            "Wisdom tooth", "Cosmetic dentistry", "Fillings", "Bonding",
+            "Night guards", "Sleep apnea", "Gum disease", "Periodontal",
+            "Implant dentures", "Full arch", "All-on-4",
+        ]
+        found_svcs = [s for s in svc_keywords if s.lower() in full_text.lower()]
+        if found_svcs:
+            result["services"] = ", ".join(found_svcs)
+            improved = True
+
+    # ── Address ───────────────────────────────────────────────────────────────
+    addr_val = str(result.get("address", "Not Found")).strip()
+    if addr_val in ("Not Found", "", "None"):
+        # Simple US street address pattern
+        addr_m = re.search(
+            r"\d+\s+[A-Z][a-zA-Z0-9\s\.\,]+(?:Blvd|Ave|St|Rd|Dr|Way|Ln|Pkwy|Suite|Ste)"
+            r"[^\n]{0,60}(?:[A-Z]{2}\s+\d{5})?",
+            full_text,
+        )
+        if addr_m:
+            result["address"] = addr_m.group(0).strip()
+            improved = True
+
+    return improved
+
+
 # ── Scrape one practice with all bypass strategies ────────────────────────────
 
 def _is_empty_result(result):
@@ -721,6 +1057,47 @@ def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
             result = result2
         else:
             print(f"  → No-proxy stealth also blocked — site requires real browser")
+
+    # ── Skyvern cloud browser fallback (UK residential IP, bypasses CF Enterprise) ──
+    # Triggered when both proxy and no-proxy Playwright fail.
+    # Skyvern uses real Chrome with residential IPs not in CF's blocklist.
+    # Requires SKYVERN_API_KEY environment variable / GitHub Secret.
+    if _is_empty_result(result) and _SKYVERN_KEY:
+        website = row.get("Website", "")
+        if website:
+            print(f"  → All local strategies blocked — trying Skyvern cloud browser…")
+            skyvern_data = _skyvern_full_scrape(website)
+            if skyvern_data and isinstance(result, dict):
+                improved = _parse_skyvern_data(skyvern_data, result)
+                if improved:
+                    print(f"  → Skyvern: data captured successfully")
+                    # Feed the full HTML into the regular scraper pipeline too,
+                    # so doctor/service extractors in dental_scraper.py can run
+                    # over properly rendered content.
+                    if skyvern_data.get("main_html") and len(skyvern_data["main_html"]) > 2000:
+                        try:
+                            from bs4 import BeautifulSoup
+                            sk_soup = BeautifulSoup(skyvern_data["main_html"], "lxml")
+                            sk_text = ds.extract_text(skyvern_data["main_html"])
+                            # Re-run doctor extraction on the rendered HTML
+                            sk_doctors, _ = ds.scrape_doctors_full(
+                                sk_soup, website, sk_text, pw_page=None
+                            )
+                            if sk_doctors:
+                                result["doctors"] = sk_doctors
+                                result["scraped_doctor_names"] = ", ".join(
+                                    d["name"] for d in sk_doctors
+                                )
+                                print(f"  → Skyvern+pipeline doctors: "
+                                      f"{result['scraped_doctor_names']}")
+                        except Exception as e:
+                            print(f"  → Skyvern pipeline re-parse skipped: {e}")
+                else:
+                    print(f"  → Skyvern reached page but extracted no usable data")
+            elif not _SKYVERN_KEY:
+                pass  # key not set — skip silently
+            else:
+                print(f"  → Skyvern: could not load page")
 
     # Supplementary pass: for network/FQHC sites where doctors are on a
     # separate dental-services page (not the main location/homepage)

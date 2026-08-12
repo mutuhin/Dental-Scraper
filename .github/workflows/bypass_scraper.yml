@@ -62,6 +62,7 @@ jobs:
         if: ${{ inputs.mode == 'urls' }}
         env:
           BYPASS_URLS: ${{ inputs.urls }}
+          SKYVERN_API_KEY: ${{ secrets.SKYVERN_API_KEY }}
         run: |
           python bypass_scraper.py \
             --urls "$BYPASS_URLS" \
@@ -119,6 +120,8 @@ jobs:
 
       - name: Run bypass (batch mode)
         if: ${{ inputs.mode == 'batch' }}
+        env:
+          SKYVERN_API_KEY: ${{ secrets.SKYVERN_API_KEY }}
         run: |
           python bypass_scraper.py \
             --batch "${{ steps.find_batch.outputs.path }}" \

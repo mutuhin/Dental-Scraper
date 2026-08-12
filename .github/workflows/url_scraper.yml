@@ -81,6 +81,7 @@ jobs:
         env:
           OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
           OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+          SKYVERN_API_KEY: ${{ secrets.SKYVERN_API_KEY }}
         run: |
           python bypass_scraper.py \
             --urls $CLEAN_URLS \
