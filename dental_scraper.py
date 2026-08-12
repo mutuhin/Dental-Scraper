@@ -52,6 +52,8 @@ def _load_bypass_proxy() -> "str | None":
     user = _os.environ.get("OXYLABS_USER", "")
     pwd  = _os.environ.get("OXYLABS_PASS", "")
     if user and pwd:
+        if not user.startswith("customer-"):
+            user = f"customer-{user}"
         return f"http://{user}:{pwd}@pr.oxylabs.io:7777"
     _pf = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "proxies.txt")
     if _os.path.exists(_pf):
@@ -1408,12 +1410,25 @@ def _ascii_normalize(text: str) -> str:
     return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
 
 
-def _extract_names_from_soup(soup):
-    """Return a set of doctor name strings from a BeautifulSoup object."""
+def _extract_names_from_soup(soup, dr_prefix_only: bool = False):
+    """Return a set of doctor name strings from a BeautifulSoup object.
+    dr_prefix_only=True restricts to patterns that require 'Dr.' prefix, reducing
+    false positives from 'FirstName LastName, DDS' in testimonials/service pages."""
+    # Strip nav/footer/testimonial blocks before full-text scan to reduce noise
+    import copy as _copy
+    soup2 = BeautifulSoup(str(soup), "lxml")
+    for _noise_tag in soup2.find_all(["nav", "footer", "aside"]):
+        _noise_tag.decompose()
+    for _noise_el in soup2.find_all(
+        attrs={"class": re.compile(r"testimonial|review|comment|sidebar|widget", re.I)}
+    ):
+        _noise_el.decompose()
     names = set()
-    raw = " ".join(soup.stripped_strings)
+    raw = " ".join(soup2.stripped_strings)
     raw_ascii = _ascii_normalize(raw)
-    for pattern in _DOCTOR_PATTERNS:
+    # When dr_prefix_only, only use patterns 0 and 2 (both require "Dr." prefix)
+    patterns = [_DOCTOR_PATTERNS[0], _DOCTOR_PATTERNS[2]] if dr_prefix_only else _DOCTOR_PATTERNS
+    for pattern in patterns:
         for m in re.finditer(pattern, raw_ascii):
             clean = re.sub(r"\s+", " ", m.group(0).strip())
             # Extend with trailing credentials after the match
@@ -2499,9 +2514,9 @@ def scrape_doctors_full(homepage_soup, base_url, all_text, pw_page=None,
             all_names = _extract_names_from_soup_strict(_fb_soup)
             if not all_names:
                 # Heading-only scan found nothing (e.g. names are in styled divs).
-                # Fall back to the full-text credential scanner which picks up
-                # "First Last, DDS" patterns anywhere in the page.
-                all_names = _extract_names_from_soup(_fb_soup)
+                # Fall back to full-text scan, but require "Dr." prefix to avoid
+                # matching "FirstName LastName, DDS" in testimonials/service text.
+                all_names = _extract_names_from_soup(_fb_soup, dr_prefix_only=True)
             for n in sorted(all_names, key=lambda x: len(x.split()), reverse=True):
                 if _is_location_false_name(n):
                     continue
@@ -3832,6 +3847,10 @@ _IG_LOGIN_SIGNALS = (
     "loginandsignuppage",
     "this page isn't available",
     "sorry, this page",
+    "accounts/login",           # redirect to login URL embedded in HTML
+    "you must log in",
+    '"viewer":null',            # IG serves this when no authenticated session
+    "loginPage",
 )
 
 def _ig_is_login_wall(html: str) -> bool:
@@ -3842,10 +3861,30 @@ def _ig_is_login_wall(html: str) -> bool:
 def _parse_ig_html(html: str) -> tuple:
     """
     Extract (posts, followers) from raw Instagram page HTML.
-    Tries window._sharedData, embedded JSON blobs, meta description, schema.org,
-    and visible text — in that order.
+    Tries __SSR_INLINE_DATA__, window._sharedData, embedded JSON blobs,
+    meta description, schema.org, and visible text — in that order.
     Returns ("", "") if nothing found.
     """
+    # 0) Current IG format: __SSR_INLINE_DATA__ script tag (2024+)
+    m_ssr = re.search(r'<script[^>]+id=["\']__SSR_INLINE_DATA__["\'][^>]*>(.*?)</script>', html, re.S)
+    if m_ssr:
+        try:
+            ssr = json.loads(m_ssr.group(1))
+            # Navigate into the nested Relay store structure
+            raw_str = json.dumps(ssr)
+            p0 = re.search(r'"media_count"\s*:\s*(\d+)', raw_str)
+            f0 = re.search(r'"follower_count"\s*:\s*(\d+)', raw_str)
+            if p0 or f0:
+                return (p0.group(1) if p0 else ""), (f0.group(1) if f0 else "")
+        except Exception:
+            pass
+
+    # 0b) Alternate: PolarisProfileRoot / require() blobs (2025+)
+    m_ppr = re.search(r'"xdt_api__v1__users__by_username__web_profile_info".*?"follower_count":(\d+)', html, re.S)
+    m_ppm = re.search(r'"xdt_api__v1__users__by_username__web_profile_info".*?"media_count":(\d+)', html, re.S)
+    if m_ppr or m_ppm:
+        return (m_ppm.group(1) if m_ppm else ""), (m_ppr.group(1) if m_ppr else "")
+
     # 1) window._sharedData (old IG format, still appears on some cached/CDN pages)
     m_sd = re.search(r'window\._sharedData\s*=\s*(\{.+?\});\s*</script>', html, re.S)
     if m_sd:
@@ -3939,6 +3978,11 @@ def get_instagram_stats_pw(url, page):
     try:
         page.goto(url, timeout=PW_TIMEOUT, wait_until="domcontentloaded")
         page.wait_for_timeout(2000 if IS_CI else 4000)
+        # Redirect check: Instagram redirects unauthenticated requests to login page
+        current_url = page.url or ""
+        if "accounts/login" in current_url or "instagram.com/login" in current_url:
+            log.debug(f"   IG Playwright: redirected to login ({current_url})")
+            return "Not Found", "Not Found"
         content = _safe_content(page)
         if _ig_is_login_wall(content):
             log.debug(f"   IG Playwright: login wall at {url}")
@@ -3950,6 +3994,8 @@ def get_instagram_stats_pw(url, page):
         return "Not Found", "Not Found"
     except Exception as e:
         log.warning(f"  Instagram Playwright error: {e}")
+        if not _pw_alive(page):
+            raise RuntimeError("playwright_browser_dead") from e
         return "Not Found", "Not Found"
 
 
@@ -5177,7 +5223,15 @@ def scrape_practice(row, pw_page=None):
         ig_posts, ig_foll = get_instagram_stats_api(result["instagram_url"])
         if not ig_posts and not ig_foll:
             if pw_page and USE_PLAYWRIGHT:
-                ig_posts, ig_foll = get_instagram_stats_pw(result["instagram_url"], pw_page)
+                try:
+                    ig_posts, ig_foll = get_instagram_stats_pw(result["instagram_url"], pw_page)
+                except RuntimeError as _ig_pwe:
+                    if "playwright_browser_dead" in str(_ig_pwe):
+                        log.warning("  Playwright browser crashed during IG — disabling")
+                        pw_page = None
+                        ig_posts, ig_foll = "Not Found", "Not Found"
+                    else:
+                        raise
             else:
                 ig_posts, ig_foll = get_instagram_stats_requests(result["instagram_url"])
         result["instagram_posts"]     = ig_posts or "Not Found"
