@@ -348,6 +348,32 @@ def _is_challenge_html(r):
     snippet = r.text[:2000].lower()
     return any(m in snippet for m in _CHALLENGE_MARKERS)
 
+# SPA shell patterns — React/Vue/Angular pages that render entirely in JS.
+# Static requests return a near-empty HTML shell; Playwright must render them.
+_SPA_ROOT_RE = re.compile(
+    r'<(?:div|main|section)\s[^>]*\bid=["\'](?:root|app|__next|ng-app|react-root|'
+    r'ember-application|nuxt|svelte)["\'][^>]*>\s*<\/(?:div|main|section)>',
+    re.I,
+)
+
+def _is_js_shell(r) -> bool:
+    """
+    Return True when the HTTP response is a JavaScript SPA shell —
+    a 200-OK page whose body has no meaningful text content because all
+    rendering happens client-side.  Returning True causes _bypass_safe_get
+    to yield None so scrape_practice's Playwright fallback renders the page.
+    """
+    if len(r.text) > 50_000:        # big pages have real content even in SPAs
+        return False
+    html = r.text
+    # Empty SPA root element: <div id="root"></div> with nothing inside
+    if _SPA_ROOT_RE.search(html):
+        # Confirm there's genuinely no text — extract visible chars
+        visible = ds.extract_text(html)
+        if len(visible) < 300:
+            return True
+    return False
+
 # ── Proxy pool ────────────────────────────────────────────────────────────────
 
 _proxy_pool: list = []
@@ -396,6 +422,9 @@ def _bypass_safe_get(url, retries=2):
                 sess = cffi_requests.Session(impersonate=profile)
                 r = sess.get(url, timeout=15, verify=False, allow_redirects=True)
                 if r.status_code == 200 and not _is_challenge_html(r):
+                    if _is_js_shell(r):
+                        ds.log.info(f"   [bypass] curl_cffi/{profile}: JS SPA shell detected — deferring to Playwright")
+                        return None
                     ds.log.info(f"   [bypass] curl_cffi/{profile} OK: {url}")
                     return r
                 # Hard block (403/407) — no point trying other profiles without proxy
@@ -416,6 +445,9 @@ def _bypass_safe_get(url, retries=2):
                 r = sess.get(url, timeout=25, verify=False, allow_redirects=True,
                              proxies={"http": proxy, "https": proxy})
                 if r.status_code == 200 and not _is_challenge_html(r):
+                    if _is_js_shell(r):
+                        ds.log.info(f"   [bypass] curl_cffi/{profile}+proxy: JS SPA shell — deferring to Playwright")
+                        return None
                     ds.log.info(f"   [bypass] curl_cffi/{profile}+proxy OK: {url}")
                     return r
                 if r.status_code in (407, 403):
@@ -430,8 +462,8 @@ def _bypass_safe_get(url, retries=2):
     # fallback is triggered.  Without this, all_soup gets set to CF HTML and
     # Playwright is never attempted.
     _fallback = _orig_safe_get(url, retries=retries)
-    if _fallback and _is_challenge_html(_fallback):
-        ds.log.info(f"   [bypass] safe_get returned CF challenge — deferring to Playwright")
+    if _fallback and (_is_challenge_html(_fallback) or _is_js_shell(_fallback)):
+        ds.log.info(f"   [bypass] safe_get returned challenge/JS-shell — deferring to Playwright")
         return None
     return _fallback
 

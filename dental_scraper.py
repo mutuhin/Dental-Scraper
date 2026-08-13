@@ -4553,6 +4553,19 @@ def scrape_practice(row, pw_page=None):
                 if r:
                     base_url = alt   # use the working URL for sub-page joins
                     break
+        # Detect JS SPA shell: 200-OK but body is <div id="root"></div> with no text.
+        # Treat it like a failed request so Playwright renders the page.
+        _js_shell_patterns = re.compile(
+            r'<(?:div|main)\s[^>]*\bid=["\'](?:root|app|__next|ng-app|react-root)["\'][^>]*>\s*'
+            r'<\/(?:div|main)>',
+            re.I,
+        )
+        if r and len(r.text) < 50_000 and _js_shell_patterns.search(r.text):
+            _visible = extract_text(r.text)
+            if len(_visible) < 300:
+                log.info(f"   JS SPA shell detected ({len(_visible)} chars) — using Playwright")
+                r = None   # fall through to Playwright below
+
         if r:
             all_soup = BeautifulSoup(r.text, "lxml")
             all_text = extract_text(r.text)
