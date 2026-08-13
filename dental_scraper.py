@@ -1280,6 +1280,9 @@ _INVALID_NAME_WORDS = frozenset({
     "affordable", "local", "premier", "modern",
     # placeholder / UI text that appears in "team" sections before real content
     "coming", "soon", "stars", "star", "up", "down",
+    # form validation / UI error text — prevents "Invalid Email Address" etc.
+    "invalid", "email", "address", "required", "error", "field", "enter",
+    "valid", "please", "submit", "form", "input", "confirm", "password",
     "placeholder", "tbd", "announcement", "available", "announced",
     "ratings", "rating", "reviews", "review", "score",
 })
