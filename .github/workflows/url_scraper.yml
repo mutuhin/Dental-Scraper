@@ -56,8 +56,8 @@ jobs:
           # Residential UK/DE as fallback (in case mobile isn't in subscription)
           echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
-          # Global rotating as last resort
-          echo "http://${OXYLABS_USER}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          # Global rotating as last resort (customer- prefix required)
+          echo "http://${BASE}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           echo "Proxy file written (UK mobile first, credentials hidden)"
 
       - name: Normalise URL list

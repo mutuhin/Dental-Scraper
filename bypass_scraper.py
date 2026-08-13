@@ -1043,15 +1043,174 @@ def _parse_skyvern_data(scraped_data, result):
 
 # ── Scrape one practice with all bypass strategies ────────────────────────────
 
+_EMPTY_VALS = {"not found", "", "none", "n/a", "0"}
+
+
 def _is_empty_result(result):
-    """Return True when scrape_practice captured nothing useful."""
+    """Return True when scrape_practice captured nothing useful.
+
+    Triggers ALL supplementary passes whenever doctor + email + key
+    services are all missing — regardless of the skip_reason.  The old
+    check (require a CF-block note in skip_reason) missed sites that
+    were reachable but had silent extraction failures in CI.
+    """
     if not isinstance(result, dict):
         return True
-    doc = str(result.get("scraped_doctor_names", "Not Found")).strip()
-    skip = str(result.get("skip_reason", "")).strip()
-    no_doc = doc in ("Not Found", "", "None", "N/A")
-    cf_blocked = "Bot Protection" in skip or "403" in skip or "Cloudflare" in skip
-    return no_doc and cf_blocked
+    doc   = str(result.get("scraped_doctor_names", "Not Found")).strip().lower()
+    email = str(result.get("email",                "Not Found")).strip().lower()
+    no_doc   = doc   in _EMPTY_VALS
+    no_email = email in _EMPTY_VALS
+    # Check key service columns — if all zero the page content wasn't captured
+    svc_total = (
+        int(result.get("implants",      0) or 0) +
+        int(result.get("veneers",       0) or 0) +
+        int(result.get("invisalign",    0) or 0) +
+        int(result.get("whitening",     0) or 0) +
+        int(result.get("sedation",      0) or 0)
+    )
+    return no_doc and no_email and svc_total == 0
+
+
+# Email addresses to ignore during extraction
+_EMAIL_SKIP = frozenset(["noreply", "example", "sentry", "wordpress", "gravatar",
+                          "schema.org", "w3.org", "png", "jpg", "gif", "svg"])
+
+# Social handles to ignore
+_FB_SKIP_HANDLES  = frozenset(["sharer", "share", "login", "dialog", "pages",
+                                 "groups", "events", "marketplace", "watch"])
+_IG_SKIP_HANDLES  = frozenset(["p", "reel", "explore", "stories", "accounts",
+                                 "tv", "direct", "tags"])
+
+# Service keyword → result field → count cap
+_DIRECT_SVC = [
+    (["implant", "dental implant"],    "implants",       99),
+    (["veneer"],                        "veneers",        99),
+    (["invisalign"],                    "invisalign",     20),
+    (["whitening", "teeth whitening"],  "whitening",      30),
+    (["sedation"],                      "sedation",       30),
+    (["clear aligner"],                 "clear_aligners", 20),
+    (["smile makeover"],                "smile_makeovers",20),
+    (["holistic"],                      "holistic",       10),
+    (["cancer screening"],              "cancer_screening",10),
+    (["cerec"],                         "cerec",           5),
+    (["laser"],                         "lasers",          5),
+    (["3d imaging", "cbct", "cone beam"],"cbct",           5),
+    (["intraoral scanner"],             "intraoral_scanners",5),
+]
+
+
+def _fill_missing_data(result, html, label="direct"):
+    """
+    Parse raw HTML and fill any fields in `result` that are still
+    'Not Found' / empty / zero.  Runs AFTER all other passes as a
+    safety net so we capture at minimum email, social links, and
+    service counts from the homepage HTML.
+    """
+    if not html or len(html) < 500:
+        return
+
+    from bs4 import BeautifulSoup as _BS4
+    import json as _json
+
+    soup = _BS4(html, "lxml")
+    # Plain text for regex + keyword counting
+    body_text = soup.get_text(separator=" ", strip=True)
+
+    filled = []
+
+    # ── Email ──────────────────────────────────────────────────────────────────
+    if str(result.get("email", "")).strip().lower() in _EMPTY_VALS:
+        for em in re.findall(
+            r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', html
+        ):
+            el = em.lower()
+            if not any(s in el for s in _EMAIL_SKIP):
+                result["email"] = em
+                filled.append(f"email={em}")
+                break
+
+    # ── Facebook URL ───────────────────────────────────────────────────────────
+    if not str(result.get("facebook_url", "")).strip():
+        fb_matches = re.findall(
+            r'https?://(?:www\.)?facebook\.com/([A-Za-z0-9_.%\-]{3,80})', html
+        )
+        for h in fb_matches:
+            if h.lower().rstrip("/") not in _FB_SKIP_HANDLES:
+                result["facebook_url"] = f"https://www.facebook.com/{h}"
+                filled.append(f"fb={h}")
+                break
+
+    # ── Instagram URL ──────────────────────────────────────────────────────────
+    if not str(result.get("instagram_url", "")).strip():
+        ig_matches = re.findall(
+            r'https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.%\-]{2,60})(?:[/?]|$|["\'])', html
+        )
+        for h in ig_matches:
+            if h.lower().rstrip("/") not in _IG_SKIP_HANDLES:
+                result["instagram_url"] = f"https://www.instagram.com/{h}"
+                filled.append(f"ig={h}")
+                break
+
+    # ── Service keyword counts ──────────────────────────────────────────────────
+    text_lc = body_text.lower()
+    for terms, field, cap in _DIRECT_SVC:
+        cur = int(result.get(field, 0) or 0)
+        if cur == 0:
+            cnt = sum(text_lc.count(t) for t in terms)
+            if cnt > 0:
+                result[field] = min(cnt, cap)
+                filled.append(f"{field}={result[field]}")
+
+    # ── Doctor names ────────────────────────────────────────────────────────────
+    doc_val = str(result.get("scraped_doctor_names", "Not Found")).strip()
+    if doc_val.lower() in _EMPTY_VALS:
+        found_names = []
+        # Pattern 1: "Dr. FirstName LastName"
+        for m in re.finditer(
+            r'Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][A-Za-z\-\']{2,})',
+            body_text,
+        ):
+            name = f"Dr. {m.group(1).strip()}"
+            if name not in found_names and not re.search(r'\d', name):
+                found_names.append(name)
+        # Pattern 2: "FirstName LastName, DDS/DMD" (no Dr. prefix)
+        for m in re.finditer(
+            r'([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{0,15})?\s+[A-Z][A-Za-z\-\']{2,20})'
+            r'\s*,?\s+(?:DDS|DMD|D\.D\.S|D\.M\.D)',
+            body_text,
+        ):
+            name = m.group(1).strip()
+            if (name not in found_names and not re.search(r'\d', name)
+                    and len(name.split()) >= 2):
+                found_names.append(name)
+        if found_names:
+            result["scraped_doctor_names"] = ", ".join(found_names[:4])
+            result["doctors"] = [
+                {"name": n, "specialty": "Not Found", "associations": "Not Found"}
+                for n in found_names[:4]
+            ]
+            filled.append(f"doctors={result['scraped_doctor_names']}")
+
+    # ── Google rating from JSON-LD ──────────────────────────────────────────────
+    rating_val = str(result.get("google_rating", "Not Found")).strip()
+    if rating_val.lower() in _EMPTY_VALS:
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                ld = _json.loads(script.string or "")
+                ag = ld.get("aggregateRating") or {}
+                rv = str(ag.get("ratingValue") or ld.get("ratingValue") or "").strip()
+                rc = str(ag.get("reviewCount") or ag.get("ratingCount") or "").strip()
+                if rv:
+                    result["google_rating"] = rv
+                    if rc:
+                        result["total_google_reviews"] = rc
+                    filled.append(f"rating={rv}({rc})")
+                    break
+            except Exception:
+                pass
+
+    if filled:
+        print(f"  → [{label}] Filled: {', '.join(filled)}")
 
 
 def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
@@ -1223,6 +1382,40 @@ def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
                     result["npi_doctors"] = True
                 else:
                     print(f"  → NPI registry: no matching dentists at this address")
+
+    # ── Final safety net: direct HTML extraction ──────────────────────────────
+    # When ALL previous passes left the result empty (no email, no doctors,
+    # no services), fetch the homepage one more time and extract what we can
+    # directly from the raw HTML — bypassing the full scrape_practice() pipeline.
+    # This catches sites where scrape_practice() silently failed in CI but the
+    # page is actually reachable.
+    if _is_empty_result(result) and isinstance(result, dict):
+        website = row.get("Website", "")
+        if website:
+            print(f"  → Result still empty — running direct HTML extraction…")
+            pw_ctx_direct = pw_page.context if pw_page is not None else None
+            _direct_html = _fetch_html_bypass(website, pw_context=pw_ctx_direct)
+            if _direct_html:
+                _fill_missing_data(result, _direct_html, label="homepage")
+            # If homepage still doesn't give us doctors, try known sub-pages
+            if (str(result.get("scraped_doctor_names", "")).strip().lower()
+                    in _EMPTY_VALS):
+                _parsed = urlparse(website)
+                _base = f"{_parsed.scheme}://{_parsed.netloc}"
+                for _slug in ["/about/", "/our-team/", "/meet-the-doctor/",
+                               "/team/", "/doctors/", "/staff/", "/about-us/"]:
+                    _sub_url = _base + _slug
+                    try:
+                        _sub_html = _fetch_html_bypass(
+                            _sub_url, pw_context=pw_ctx_direct
+                        )
+                        if _sub_html and len(_sub_html) > 500:
+                            _fill_missing_data(result, _sub_html, label=_slug)
+                            if (str(result.get("scraped_doctor_names", ""))
+                                    .strip().lower() not in _EMPTY_VALS):
+                                break  # found doctors — stop
+                    except Exception:
+                        pass
 
     return result
 
