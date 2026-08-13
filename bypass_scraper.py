@@ -427,10 +427,9 @@ def _bypass_safe_get(url, retries=2):
                         return None
                     ds.log.info(f"   [bypass] curl_cffi/{profile} OK: {url}")
                     return r
-                # Hard block (403/407) — no point trying other profiles without proxy
-                if r.status_code in (403, 407):
+                # Hard block or CF challenge (403/407/202) — skip to proxy immediately
+                if r.status_code in (403, 407, 202):
                     break
-                # 202 / other challenge — try next profile before giving up
             except Exception:
                 continue
 
@@ -760,7 +759,8 @@ def _extract_doctors_from_html(html):
 
 def _fetch_html_bypass(url, pw_context=None):
     """Fetch a URL with bypass strategies, return HTML text or None."""
-    # Try curl_cffi first (fast, no subprocess)
+    # Strategy 1: curl_cffi without proxy (fast)
+    _cffi_blocked = False
     if _CFFI_OK:
         for profile in random.sample(_CFFI_PROFILES[:4], 4):
             try:
@@ -768,11 +768,30 @@ def _fetch_html_bypass(url, pw_context=None):
                 r = sess.get(url, timeout=15, verify=False, allow_redirects=True)
                 if r.status_code == 200 and not _is_challenge_html(r):
                     return r.text
-                if r.status_code in (403, 407):
-                    break  # hard block — skip remaining profiles
+                if r.status_code in (403, 407, 202):
+                    _cffi_blocked = True
+                    break  # hard block — try proxy
             except Exception:
                 continue
-    # Playwright stealth
+
+    # Strategy 2: curl_cffi WITH proxy (when no-proxy was blocked)
+    if _CFFI_OK and _cffi_blocked and _proxy_pool:
+        available = [p for p in _proxy_pool if p not in _proxy_fail]
+        for proxy in available[:3]:
+            profile = random.choice(_CFFI_PROFILES[:3])
+            try:
+                sess = cffi_requests.Session(impersonate=profile)
+                r = sess.get(url, timeout=25, verify=False, allow_redirects=True,
+                             proxies={"http": proxy, "https": proxy})
+                if r.status_code == 200 and not _is_challenge_html(r):
+                    return r.text
+                if r.status_code in (407, 403):
+                    _proxy_fail.add(proxy)
+            except Exception:
+                _proxy_fail.add(proxy)
+                continue
+
+    # Strategy 3: Playwright stealth (uses pw_context which has proxy)
     html = _pw_get_html(url, pw_context=pw_context)
     if html:
         return html
