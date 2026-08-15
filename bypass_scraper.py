@@ -427,8 +427,8 @@ def _bypass_safe_get(url, retries=2):
                         return None
                     ds.log.info(f"   [bypass] curl_cffi/{profile} OK: {url}")
                     return r
-                # Hard block or CF challenge (403/407/202) — skip to proxy immediately
-                if r.status_code in (403, 407, 202):
+                # Hard block (403/407/202) OR 200 with challenge body — try proxy
+                if r.status_code in (403, 407, 202) or _is_challenge_html(r):
                     break
             except Exception:
                 continue
@@ -768,10 +768,12 @@ def _fetch_html_bypass(url, pw_context=None):
                 r = sess.get(url, timeout=15, verify=False, allow_redirects=True)
                 if r.status_code == 200 and not _is_challenge_html(r):
                     return r.text
-                if r.status_code in (403, 407, 202):
-                    _cffi_blocked = True
-                    break  # hard block — try proxy
+                # Hard block (403/407/202) OR 200 with challenge body — try proxy
+                _cffi_blocked = True
+                break
             except Exception:
+                # Network/timeout error — mark for proxy retry, try next profile
+                _cffi_blocked = True
                 continue
 
     # Strategy 2: curl_cffi WITH proxy (when no-proxy was blocked)
@@ -879,14 +881,24 @@ def _lookup_npi_dentists(city, state, street_address=""):
 
 def _supplement_doctors(result, website, pw_context=None):
     """
-    When the main scrape found no doctors, fetch dental sub-pages and extract
-    doctor names via full-text regex.  Updates result in-place.
+    Fetch dental sub-pages and extract doctor names via full-text regex,
+    merging any new names with whatever the main scrape already found.
+    Runs even when some doctors were already captured — catches practices
+    where the main scrape found 1 doctor but 3 more are on sub-pages.
     """
     existing_doctors = result.get("doctors") or []
-    if any(d.get("name") and d["name"] not in ("Not Found", "") for d in existing_doctors):
-        return   # already have doctors
+    existing_names = {
+        d["name"] for d in existing_doctors
+        if d.get("name") and d["name"] not in ("Not Found", "")
+    }
 
-    print(f"  → No doctors found — trying supplementary dental sub-page crawl…")
+    # Don't bother if we already have a large list (5+ doctors)
+    if len(existing_names) >= 5:
+        return
+
+    label = "supplementary" if not existing_names else "supplementary-merge"
+    print(f"  → Running {label} dental sub-page crawl (have {len(existing_names)} doctor(s))…")
+
     main_html = _fetch_html_bypass(website, pw_context=pw_context)
     if not main_html:
         print("  → Could not fetch main page for sub-page discovery")
@@ -898,24 +910,30 @@ def _supplement_doctors(result, website, pw_context=None):
         return
 
     print(f"  → Dental sub-pages: {sub_urls}")
-    found_doctors = []
+    found_doctors = list(existing_doctors)   # start with already-found list
+    found_names_lc = {n.lower() for n in existing_names}
+
     for url in sub_urls:
         print(f"     Fetching: {url}")
         html = _fetch_html_bypass(url, pw_context=pw_context)
         if not html:
             continue
         drs = _extract_doctors_from_html(html)
+        new_here = []
         for d in drs:
-            if not any(e["name"] == d["name"] for e in found_doctors):
+            if d["name"].lower() not in found_names_lc:
                 found_doctors.append(d)
-        if found_doctors:
-            print(f"     Found {len(drs)} doctor(s): {', '.join(x['name'] for x in drs)}")
+                found_names_lc.add(d["name"].lower())
+                new_here.append(d["name"])
+        if new_here:
+            print(f"     New doctor(s): {', '.join(new_here)}")
 
-    if found_doctors:
+    new_total = [d for d in found_doctors if d["name"] not in existing_names]
+    if new_total:
         result["doctors"] = found_doctors
         result["scraped_doctor_names"] = ", ".join(d["name"] for d in found_doctors)
-        print(f"  → Supplementary doctors captured: {result['scraped_doctor_names']}")
-    else:
+        print(f"  → After supplementary crawl: {result['scraped_doctor_names']}")
+    elif not existing_names:
         print(f"  → Supplementary crawl: still no doctors found")
 
 
@@ -1181,34 +1199,54 @@ def _fill_missing_data(result, html, label="direct"):
                 filled.append(f"{field}={result[field]}")
 
     # ── Doctor names ────────────────────────────────────────────────────────────
-    doc_val = str(result.get("scraped_doctor_names", "Not Found")).strip()
-    if doc_val.lower() in _EMPTY_VALS:
-        found_names = []
-        # Pattern 1: "Dr. FirstName LastName"
-        for m in re.finditer(
-            r'Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][A-Za-z\-\']{2,})',
-            body_text,
-        ):
-            name = f"Dr. {m.group(1).strip()}"
-            if name not in found_names and not re.search(r'\d', name):
-                found_names.append(name)
-        # Pattern 2: "FirstName LastName, DDS/DMD" (no Dr. prefix)
-        for m in re.finditer(
-            r'([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{0,15})?\s+[A-Z][A-Za-z\-\']{2,20})'
-            r'\s*,?\s+(?:DDS|DMD|D\.D\.S|D\.M\.D)',
-            body_text,
-        ):
-            name = m.group(1).strip()
-            if (name not in found_names and not re.search(r'\d', name)
-                    and len(name.split()) >= 2):
-                found_names.append(name)
-        if found_names:
-            result["scraped_doctor_names"] = ", ".join(found_names[:4])
-            result["doctors"] = [
-                {"name": n, "specialty": "Not Found", "associations": "Not Found"}
-                for n in found_names[:4]
-            ]
-            filled.append(f"doctors={result['scraped_doctor_names']}")
+    # Always run: merge any newly found names with existing ones.
+    existing_doc_val = str(result.get("scraped_doctor_names", "Not Found")).strip()
+    existing_names_list = (
+        [n.strip() for n in existing_doc_val.split(",") if n.strip().lower() not in _EMPTY_VALS]
+        if existing_doc_val.lower() not in _EMPTY_VALS else []
+    )
+    found_names = list(existing_names_list)  # start with already-found names
+    found_names_lc = {n.lower() for n in found_names}
+
+    def _add_doctor(name):
+        """Validate and add a doctor name if not already present."""
+        name = re.sub(r"\s+", " ", name.strip())
+        if not name or re.search(r'\d', name):
+            return
+        if len(name.split()) < 2:
+            return  # require at least first + last name
+        if any(w in name.lower() for w in ds._SKIP_WORDS):
+            return
+        if not ds._is_valid_doctor_name(name):
+            return
+        if name.lower() not in found_names_lc:
+            found_names.append(name)
+            found_names_lc.add(name.lower())
+
+    # Pattern 1: "Dr. FirstName LastName" (with optional middle initial)
+    for m in re.finditer(
+        r'Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][A-Za-z\-\']{2,})',
+        body_text,
+    ):
+        _add_doctor(f"Dr. {m.group(1).strip()}")
+
+    # Pattern 2: "FirstName LastName, DDS/DMD" (no Dr. prefix)
+    for m in re.finditer(
+        r'([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{0,15})?\s+[A-Z][A-Za-z\-\']{2,20})'
+        r'\s*,?\s+(?:DDS|DMD|D\.D\.S|D\.M\.D)',
+        body_text,
+    ):
+        _add_doctor(m.group(1).strip())
+
+    # Only update result when we found NEW names
+    if len(found_names) > len(existing_names_list):
+        result["scraped_doctor_names"] = ", ".join(found_names[:8])
+        result["doctors"] = [
+            {"name": n, "specialty": "Not Found", "associations": "Not Found"}
+            for n in found_names[:8]
+        ]
+        new_names = found_names[len(existing_names_list):]
+        filled.append(f"doctors+={', '.join(new_names)}")
 
     # ── Google rating from JSON-LD ──────────────────────────────────────────────
     rating_val = str(result.get("google_rating", "Not Found")).strip()
@@ -1416,13 +1454,37 @@ def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
             _direct_html = _fetch_html_bypass(website, pw_context=pw_ctx_direct)
             if _direct_html:
                 _fill_missing_data(result, _direct_html, label="homepage")
-            # If homepage still doesn't give us doctors, try known sub-pages
-            if (str(result.get("scraped_doctor_names", "")).strip().lower()
-                    in _EMPTY_VALS):
+            # Always scan known team/about sub-pages and MERGE doctors across all of them
+            _parsed = urlparse(website)
+            _base = f"{_parsed.scheme}://{_parsed.netloc}"
+            for _slug in ["/about/", "/our-team/", "/meet-the-doctor/",
+                           "/team/", "/doctors/", "/staff/", "/about-us/",
+                           "/our-doctors/", "/meet-our-team/", "/providers/",
+                           "/meet-the-team/", "/our-dentists/"]:
+                _sub_url = _base + _slug
+                try:
+                    _sub_html = _fetch_html_bypass(
+                        _sub_url, pw_context=pw_ctx_direct
+                    )
+                    if _sub_html and len(_sub_html) > 500:
+                        _fill_missing_data(result, _sub_html, label=_slug)
+                except Exception:
+                    pass
+
+    # ── Even when the result is NOT empty, run _fill_missing_data on team sub-pages
+    # to capture additional doctors missed by the main scrape pipeline.
+    elif isinstance(result, dict):
+        _doc_val = str(result.get("scraped_doctor_names", "Not Found")).strip()
+        _want_more_doctors = _doc_val.lower() in _EMPTY_VALS or len(_doc_val.split(",")) < 3
+        if _want_more_doctors:
+            website = row.get("Website", "")
+            if website:
+                pw_ctx_direct = pw_page.context if pw_page is not None else None
                 _parsed = urlparse(website)
                 _base = f"{_parsed.scheme}://{_parsed.netloc}"
-                for _slug in ["/about/", "/our-team/", "/meet-the-doctor/",
-                               "/team/", "/doctors/", "/staff/", "/about-us/"]:
+                for _slug in ["/our-team/", "/team/", "/doctors/",
+                               "/meet-the-doctor/", "/meet-our-team/",
+                               "/our-doctors/", "/providers/", "/staff/"]:
                     _sub_url = _base + _slug
                     try:
                         _sub_html = _fetch_html_bypass(
@@ -1430,9 +1492,6 @@ def scrape_with_bypass(row, pw_page=None, pw_page_noproxy=None):
                         )
                         if _sub_html and len(_sub_html) > 500:
                             _fill_missing_data(result, _sub_html, label=_slug)
-                            if (str(result.get("scraped_doctor_names", ""))
-                                    .strip().lower() not in _EMPTY_VALS):
-                                break  # found doctors — stop
                     except Exception:
                         pass
 
