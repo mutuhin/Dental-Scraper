@@ -17,7 +17,7 @@ on:
 jobs:
   scrape_urls:
     runs-on: ubuntu-latest
-    timeout-minutes: 300   # 5 hours — Playwright + proxy is slow per site
+    timeout-minutes: 350   # ~5h50m — near GitHub Actions max (360); Playwright is slow per site
 
     steps:
       - name: Checkout code
