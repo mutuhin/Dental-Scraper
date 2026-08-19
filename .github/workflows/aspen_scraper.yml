@@ -1,0 +1,107 @@
+name: Aspen Dental Scraper
+
+# Specialized scraper for Aspen Dental location pages.
+# Uses __NEXT_DATA__ JSON extraction + NPI registry — NO Playwright needed.
+# Much faster than the general URL scraper: ~30s per site vs 2–15 min.
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: >
+          Aspen Dental location URLs — one per line or comma-separated.
+          Example: https://www.aspendental.com/dentist/ma/worcester/537-lincoln-street-ste-3
+        required: true
+        default: ""
+
+jobs:
+  scrape_aspen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # 2 hours — plenty for 100+ Aspen locations at ~30s each
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml openpyxl curl-cffi
+
+      - name: Write proxies file
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+        run: |
+          BASE="${OXYLABS_USER}"
+          if [[ "$BASE" != customer-* ]]; then
+            BASE="customer-${BASE}"
+          fi
+          # UK + DE mobile (real 4G IPs — hardest to block)
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@mobile.oxylabs.io:7777" >  proxies.txt
+          echo "http://${BASE}-cc-de:${OXYLABS_PASS}@mobile.oxylabs.io:7777" >> proxies.txt
+          # US residential (Aspen Dental is US-only, so US IP needed)
+          echo "http://${BASE}-cc-us:${OXYLABS_PASS}@pr.oxylabs.io:7777"     >> proxies.txt
+          # Residential UK/DE as fallback
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777"     >> proxies.txt
+          echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777"     >> proxies.txt
+          # Global rotating last resort
+          echo "http://${BASE}:${OXYLABS_PASS}@pr.oxylabs.io:7777"           >> proxies.txt
+          echo "Proxy file written (credentials hidden)"
+
+      - name: Normalise URL list
+        env:
+          RAW_URLS: ${{ inputs.urls }}
+        run: |
+          CLEAN=$(python3 -c "
+          import os, re
+          raw = os.environ.get('RAW_URLS', '')
+          urls = re.split(r'[\s,]+', raw)
+          urls = [u.strip() for u in urls if u.strip().startswith('http')]
+          print(' '.join(urls))
+          ")
+          echo "CLEAN_URLS=$CLEAN" >> "$GITHUB_ENV"
+          COUNT=$(echo $CLEAN | wc -w)
+          echo "URL count: $COUNT"
+          echo "$CLEAN" | tr ' ' '\n'
+
+      - name: Run Aspen Dental scraper
+        env:
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+        run: |
+          python aspen_scraper.py \
+            --urls $CLEAN_URLS \
+            --proxies proxies.txt \
+            --output aspen_scrape_output.xlsx
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspen-scrape-output
+          path: aspen_scrape_output.xlsx
+          retention-days: 30
+          overwrite: true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Aspen Dental Scraper Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f aspen_scrape_output.xlsx ]; then
+            echo "Artifact: **aspen-scrape-output**" >> $GITHUB_STEP_SUMMARY
+            echo "Size: $(du -h aspen_scrape_output.xlsx | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**No output file produced**" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "URLs scraped:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$CLEAN_URLS" | tr ' ' '\n' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
