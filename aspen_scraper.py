@@ -199,6 +199,7 @@ def _pw_fetch(url: str, proxy: str = None, timeout_ms: int = 60000) -> str | Non
         return None
     try:
         with sync_playwright() as pw:
+            # proxy must go to launch(), not new_context(), for chromium.launch()
             launch_kwargs = dict(
                 headless=True,
                 ignore_https_errors=True,
@@ -221,6 +222,8 @@ def _pw_fetch(url: str, proxy: str = None, timeout_ms: int = 60000) -> str | Non
                     "Chrome/136.0.0.0 Safari/537.36"
                 ),
                 ignore_https_errors=True,
+                # proxy also passed to new_context so sub-resource requests use it
+                **({"proxy": _pw_proxy_dict(proxy)} if proxy else {}),
             )
             page = ctx.new_page()
 
@@ -343,6 +346,39 @@ def _parse_aspen_url(url: str) -> dict:
                 info["street_num"] = slug_parts[0]
 
     return info
+
+
+# ── Address from URL slug (deterministic — no network needed) ─────────────────
+
+_SLUG_ABBREVS = {
+    "ave": "Avenue", "blvd": "Boulevard", "rd": "Road", "dr": "Drive",
+    "ln": "Lane",    "pkwy": "Parkway",   "hwy": "Highway", "ct": "Court",
+    "pl": "Place",   "cir": "Circle",     "ste": "Suite",   "trl": "Trail",
+    "fwy": "Freeway","expy": "Expressway","sq": "Square",
+    # directionals — keep uppercase
+    "n": "N", "s": "S", "e": "E", "w": "W",
+    "ne": "NE", "nw": "NW", "se": "SE", "sw": "SW",
+}
+
+
+def _address_from_slug(slug: str) -> str:
+    """
+    Convert an Aspen Dental URL address slug to a human-readable street address.
+    "537-lincoln-street-ste-3"  →  "537 Lincoln Street Suite 3"
+    "9405-n-newport-hwy"        →  "9405 N Newport Highway"
+    """
+    if not slug:
+        return ""
+    tokens = slug.lower().split("-")
+    nice = []
+    for tok in tokens:
+        if tok in _SLUG_ABBREVS:
+            nice.append(_SLUG_ABBREVS[tok])
+        elif tok.isdigit():
+            nice.append(tok)
+        else:
+            nice.append(tok.title())
+    return " ".join(nice)
 
 
 # ── Data extraction from __NEXT_DATA__ ───────────────────────────────────────
@@ -686,24 +722,66 @@ def extract_text_scan(html: str) -> dict:
 
 # ── NPI registry ──────────────────────────────────────────────────────────────
 
-def npi_lookup_aspen(city: str, state: str, address_slug: str) -> list[str]:
+def _npi_fetch_all(city: str, state: str) -> list[dict]:
     """
-    Query the NPI registry for dentists at this Aspen Dental location.
+    Fetch ALL NPI-1 dentist records for a city/state, paginating through results.
+    NPI caps each page at 200; we paginate until we have everything.
+    """
+    all_results = []
+    skip = 0
+    while True:
+        params = {
+            "version": "2.1",
+            "enumeration_type": "NPI-1",
+            "city": city,
+            "state": state,
+            "taxonomy_description": "dentist",
+            "limit": "200",
+            "skip": str(skip),
+        }
+        url = "https://npiregistry.cms.hhs.gov/api/?" + urllib.parse.urlencode(params)
+        try:
+            r = std_requests.get(url, timeout=15)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            page = data.get("results", [])
+            all_results.extend(page)
+            if len(page) < 200:
+                break   # last page
+            skip += 200
+            time.sleep(0.3)  # be polite to the NPI API
+        except Exception:
+            break
+    return all_results
 
-    Matching strategy (most-to-least strict, stops at first hit):
-      1. "aspen" in the NPI organisation name — most reliable
-      2. Street number + one street word both present in address
-      3. Street number only (catches abbreviated addresses)
-      4. If city has ≤5 dentists total, return all of them (small-town fallback)
+
+def npi_lookup_aspen(city: str, state: str, address_slug: str) -> dict:
     """
+    Query NPI for dentists at this Aspen Dental location.
+    Returns dict with keys: 'doctors' (list of name strings),
+                            'phone'   (str or ""),
+                            'zip'     (str or ""),
+                            'address' (str or "").
+
+    Matching strategy (most-to-least strict):
+      1. "aspen" in NPI org name — most reliable signal
+      2. Street number + one meaningful street word
+      3. Street number only
+      4. Small-city fallback: ≤15 dentists total → return all
+    Paginates through all NPI results so large cities don't miss matches.
+    Also returns phone / zip from the matching NPI location address record.
+    """
+    empty = {"doctors": [], "phone": "", "zip": "", "address": ""}
     if not city or not state:
-        return []
+        return empty
 
-    # Parse address tokens from slug
-    slug_parts = address_slug.lower().replace("-", " ").split()
+    # Parse address tokens from URL slug
+    slug_parts = address_slug.lower().split("-")
     street_num = slug_parts[0] if slug_parts and slug_parts[0].isdigit() else ""
     _noise = {"ste", "suite", "st", "ave", "blvd", "rd", "dr", "ln",
-              "pkwy", "hwy", "n", "s", "e", "w", "floor", "fl", "highway", "route"}
+              "pkwy", "hwy", "n", "s", "e", "w", "fl", "floor",
+              "highway", "route", "b", "c", "d", "e", "f"}
     street_words = [w for w in slug_parts[1:]
                     if w not in _noise and not w.isdigit() and len(w) > 3]
 
@@ -720,94 +798,108 @@ def npi_lookup_aspen(city: str, state: str, address_slug: str) -> list[str]:
             name = f"{name}, {cred}"
         return name if _validate_doctor_name(name) else None
 
+    def _location_addr(item: dict) -> dict:
+        """Extract phone/zip/address from NPI LOCATION address record."""
+        for addr in item.get("addresses", []):
+            if addr.get("address_purpose", "").upper() == "LOCATION":
+                return {
+                    "phone":   addr.get("telephone_number", ""),
+                    "zip":     addr.get("postal_code", "")[:5],
+                    "address": addr.get("address_1", ""),
+                }
+        # Fallback: first address
+        addrs = item.get("addresses", [])
+        if addrs:
+            return {
+                "phone":   addrs[0].get("telephone_number", ""),
+                "zip":     addrs[0].get("postal_code", "")[:5],
+                "address": addrs[0].get("address_1", ""),
+            }
+        return {"phone": "", "zip": "", "address": ""}
+
+    def _addr_matches_pass(addr_obj: dict, pass_num: int) -> bool:
+        a1  = addr_obj.get("address_1", "").lower()
+        org = addr_obj.get("organization_name", "").lower()
+        if pass_num == 1:
+            return "aspen" in org
+        if pass_num == 2:
+            num_ok  = bool(street_num) and street_num in a1.split()
+            word_ok = any(w in a1 for w in street_words[:2])
+            return num_ok and word_ok
+        if pass_num == 3:
+            return bool(street_num) and street_num in a1.split()
+        return False  # pass 4 handled separately
+
     try:
-        params = {
-            "version": "2.1",
-            "enumeration_type": "NPI-1",
-            "city": city,
-            "state": state,
-            "taxonomy_description": "dentist",
-            "limit": "200",
-        }
-        url = "https://npiregistry.cms.hhs.gov/api/?" + urllib.parse.urlencode(params)
-        r = std_requests.get(url, timeout=15)
-        if r.status_code != 200:
-            return []
-        results = r.json().get("results", [])
-        total_in_city = len(results)
+        print(f"  [NPI] Fetching dentists in {city}, {state}…")
+        results = _npi_fetch_all(city, state)
+        total = len(results)
+        print(f"  [NPI] {total} dentist(s) found")
 
-        seen: set = set()
+        seen_names: set = set()
+        seen_npis:  set = set()
 
-        def _add(name):
-            if name and name.lower() not in seen:
-                seen.add(name.lower())
-
-        # ── Pass 1: "aspen" in NPI org name ──────────────────────────────────
-        aspen_matches = []
-        for item in results:
-            for addr in item.get("addresses", []):
-                if "aspen" in addr.get("organization_name", "").lower():
-                    n = _build_name(item)
-                    if n:
-                        aspen_matches.append(n)
-                        _add(n)
-                    break
-        if aspen_matches:
-            print(f"  [NPI] Aspen org-name match: {len(aspen_matches)} doctor(s)")
-            return aspen_matches
-
-        # ── Pass 2: street number + street word ───────────────────────────────
-        addr_matches = []
-        if street_num:
+        def _collect_pass(pass_num: int) -> dict:
+            """Run one matching pass. Returns result dict if any matched, else {}."""
+            doctors = []
+            phone = zip_ = address = ""
             for item in results:
+                npi_num = item.get("number", "")
+                if npi_num in seen_npis:
+                    continue
                 for addr in item.get("addresses", []):
-                    a1 = addr.get("address_1", "").lower()
-                    num_ok  = street_num in a1.split()
-                    word_ok = any(w in a1 for w in street_words[:2])
-                    if num_ok and word_ok:
+                    if _addr_matches_pass(addr, pass_num):
                         n = _build_name(item)
-                        if n and n.lower() not in seen:
-                            addr_matches.append(n)
-                            _add(n)
+                        if n and n.lower() not in seen_names:
+                            loc = _location_addr(item)
+                            doctors.append(n)
+                            seen_names.add(n.lower())
+                            seen_npis.add(npi_num)
+                            if not phone and loc["phone"]:
+                                phone = loc["phone"]
+                            if not zip_ and loc["zip"]:
+                                zip_ = loc["zip"]
+                            if not address and loc["address"]:
+                                address = loc["address"]
                         break
-        if addr_matches:
-            print(f"  [NPI] Street num+word match: {len(addr_matches)} doctor(s)")
-            return addr_matches
+            if doctors:
+                print(f"  [NPI] Pass {pass_num} match: {len(doctors)} doctor(s)")
+                return {"doctors": doctors, "phone": phone,
+                        "zip": zip_, "address": address}
+            return {}
 
-        # ── Pass 3: street number only ────────────────────────────────────────
-        num_only_matches = []
-        if street_num:
-            for item in results:
-                for addr in item.get("addresses", []):
-                    a1 = addr.get("address_1", "").lower()
-                    if street_num in a1.split():
-                        n = _build_name(item)
-                        if n and n.lower() not in seen:
-                            num_only_matches.append(n)
-                            _add(n)
-                        break
-        if num_only_matches:
-            print(f"  [NPI] Street-number-only match: {len(num_only_matches)} doctor(s)")
-            return num_only_matches
+        for pass_num in (1, 2, 3):
+            r = _collect_pass(pass_num)
+            if r:
+                return r
 
-        # ── Pass 4: small city fallback (≤5 total dentists) ───────────────────
-        if total_in_city <= 5:
-            small_city = []
+        # Pass 4: small-city fallback — ≤15 dentists total in city
+        if total <= 15:
+            doctors = []
+            phone = zip_ = address = ""
             for item in results:
                 n = _build_name(item)
-                if n and n.lower() not in seen:
-                    small_city.append(n)
-                    _add(n)
-            if small_city:
-                print(f"  [NPI] Small-city fallback ({total_in_city} dentists): {len(small_city)}")
-                return small_city
+                if n and n.lower() not in seen_names:
+                    loc = _location_addr(item)
+                    doctors.append(n)
+                    seen_names.add(n.lower())
+                    if not phone and loc["phone"]:
+                        phone = loc["phone"]
+                    if not zip_ and loc["zip"]:
+                        zip_ = loc["zip"]
+                    if not address and loc["address"]:
+                        address = loc["address"]
+            if doctors:
+                print(f"  [NPI] Small-city fallback ({total} dentists): {len(doctors)}")
+                return {"doctors": doctors, "phone": phone,
+                        "zip": zip_, "address": address}
 
-        print(f"  [NPI] No match found ({total_in_city} dentists in {city}, {state})")
-        return []
+        print(f"  [NPI] No address match for {city}, {state} (slug={address_slug})")
+        return empty
 
     except Exception as e:
         print(f"  [NPI] Error: {e}")
-        return []
+        return empty
 
 
 # ── Main scrape function ──────────────────────────────────────────────────────
@@ -821,6 +913,9 @@ def scrape_aspen_location(url: str) -> dict:
                       if info["city"] and info["state"]
                       else "Aspen Dental")
 
+    # Derive street address from URL slug immediately — no network needed
+    slug_addr = _address_from_slug(info.get("address_slug", ""))
+
     result: dict = {
         "website":              clean_url,
         "practice_name":        practice_label,
@@ -829,7 +924,8 @@ def scrape_aspen_location(url: str) -> dict:
         "scraped_doctor_names": "Not Found",
         "email":                "Not Found",
         "phone":                "Not Found",
-        "address":              "Not Found",
+        # Pre-fill address from URL slug; NPI/HTML may upgrade to a canonical form
+        "address":              slug_addr or "Not Found",
         "zip":                  "Not Found",
         "skip_reason":          "",
         "doctors":              [],
@@ -883,45 +979,58 @@ def scrape_aspen_location(url: str) -> dict:
             for k, v in ts.items():
                 if v and result.get(k) in (None, "Not Found", 0, ""):
                     result[k] = v
+
+        # Step 1e: phone regex fallback from raw HTML
+        if result.get("phone") == "Not Found":
+            pm = re.search(r'\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}', html)
+            if pm:
+                result["phone"] = pm.group(0).strip()
     else:
-        print(f"  ✗ Page blocked (CF Enterprise)")
-        result["skip_reason"] = "CF / Bot Protected — page inaccessible"
+        print(f"  ✗ Page blocked (CF Enterprise) — using NPI + URL-derived address")
+        result["skip_reason"] = "CF / Bot Protected — NPI used for doctors"
 
-    # ── Step 2: NPI registry (runs regardless — verifies & supplements) ───────
+    # ── Step 2: NPI registry (always runs — supplements/verifies website data) ─
     if info["city"] and info["state"]:
-        print(f"  → NPI: {info['city']}, {info['state']} / slug={info['address_slug']}")
-        npi_docs = npi_lookup_aspen(info["city"], info["state"], info["address_slug"])
+        npi = npi_lookup_aspen(info["city"], info["state"], info.get("address_slug", ""))
 
-        if npi_docs:
-            if result.get("scraped_doctor_names") == "Not Found":
-                result["scraped_doctor_names"] = ", ".join(npi_docs)
+        if npi["doctors"]:
+            existing_lc = set()
+            if result.get("scraped_doctor_names") not in ("Not Found", "", None):
+                existing_lc = {n.strip().lower()
+                               for n in result["scraped_doctor_names"].split(",")}
+
+            new_docs = [n for n in npi["doctors"] if n.lower() not in existing_lc]
+            if result.get("scraped_doctor_names") in ("Not Found", "", None):
+                result["scraped_doctor_names"] = ", ".join(npi["doctors"])
                 result["doctors"] = [{"name": n, "specialty": "Not Found", "associations": ""}
-                                     for n in npi_docs]
+                                     for n in npi["doctors"]]
                 print(f"  ✓ NPI doctors: {result['scraped_doctor_names']}")
-            else:
-                # Merge any NPI names not already in result
-                existing_lc = {n.lower() for n in result["scraped_doctor_names"].split(", ")}
-                new_npi = [n for n in npi_docs if n.lower() not in existing_lc]
-                if new_npi:
-                    all_names = result["scraped_doctor_names"] + ", " + ", ".join(new_npi)
-                    result["scraped_doctor_names"] = all_names
-                    result["doctors"].extend(
-                        [{"name": n, "specialty": "Not Found", "associations": ""} for n in new_npi]
-                    )
-                    print(f"  ✓ NPI added {len(new_npi)} more: {', '.join(new_npi)}")
-        else:
-            print(f"  → NPI: no Aspen Dental match at this address")
+            elif new_docs:
+                result["scraped_doctor_names"] += ", " + ", ".join(new_docs)
+                result["doctors"].extend(
+                    [{"name": n, "specialty": "Not Found", "associations": ""} for n in new_docs]
+                )
+                print(f"  ✓ NPI added {len(new_docs)}: {', '.join(new_docs)}")
+
+            # Fill phone / zip / address from NPI if still missing
+            if result.get("phone") == "Not Found" and npi["phone"]:
+                result["phone"] = npi["phone"]
+                print(f"  ✓ NPI phone: {npi['phone']}")
+
+            if result.get("zip") == "Not Found" and npi["zip"]:
+                result["zip"] = npi["zip"]
+
+            # Only upgrade address from NPI if it looks more complete than slug-derived
+            npi_addr = npi.get("address", "")
+            cur_addr = result.get("address", "")
+            if npi_addr and (cur_addr in ("Not Found", "") or
+                             (slug_addr and len(npi_addr) > len(slug_addr))):
+                result["address"] = npi_addr.title()
 
     # ── Step 3: guarantee core service flags (Aspen offers these everywhere) ──
     for svc, default_val in _ASPEN_CORE_SERVICES.items():
         if not result.get(svc):
             result[svc] = default_val
-
-    # ── Step 4: extract phone from HTML text if still missing ─────────────────
-    if result.get("phone") == "Not Found" and html:
-        pm = re.search(r'\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}', html)
-        if pm:
-            result["phone"] = pm.group(0).strip()
 
     return result
 
