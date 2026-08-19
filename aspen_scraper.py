@@ -69,6 +69,23 @@ try:
 except ImportError:
     sys.exit("pip install beautifulsoup4 lxml")
 
+try:
+    from playwright.sync_api import sync_playwright
+    _PW_OK = True
+except ImportError:
+    _PW_OK = False
+
+try:
+    from playwright_stealth import stealth_sync as _stealth_sync
+    _STEALTH_OK = True
+except ImportError:
+    try:
+        from playwright_stealth import Stealth as _StealthClass
+        _stealth_sync = _StealthClass().apply_stealth_sync
+        _STEALTH_OK = True
+    except (ImportError, AttributeError):
+        _STEALTH_OK = False
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _CFFI_PROFILES = ["chrome136", "chrome124", "chrome133a", "chrome110", "safari260", "safari17_2"]
@@ -153,22 +170,148 @@ def _fetch(url: str, proxy: str = None, timeout: int = 25) -> str | None:
     return None
 
 
+_STEALTH_JS = """
+(function(){
+  Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+  window.chrome={app:{isInstalled:false},csi:function(){},loadTimes:function(){},runtime:{}};
+  Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+})();
+"""
+
+def _pw_proxy_dict(proxy_url: str) -> dict:
+    p = urlparse(proxy_url)
+    d = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        d["username"] = p.username
+    if p.password:
+        d["password"] = p.password
+    return d
+
+
+def _pw_fetch(url: str, proxy: str = None, timeout_ms: int = 60000) -> str | None:
+    """
+    Fetch URL with Playwright stealth (with optional proxy).
+    Hard timeout of 60 s — Aspen Dental resolves CF challenges within that window.
+    Returns full rendered HTML or None.
+    """
+    if not _PW_OK:
+        return None
+    try:
+        with sync_playwright() as pw:
+            launch_kwargs = dict(
+                headless=True,
+                ignore_https_errors=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-first-run",
+                    "--disable-dev-shm-usage",
+                    "--window-size=1920,1080",
+                ],
+            )
+            if proxy:
+                launch_kwargs["proxy"] = _pw_proxy_dict(proxy)
+
+            browser = pw.chromium.launch(**launch_kwargs)
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/136.0.0.0 Safari/537.36"
+                ),
+                ignore_https_errors=True,
+            )
+            page = ctx.new_page()
+
+            # Apply stealth
+            if _STEALTH_OK:
+                try:
+                    _stealth_sync(page)
+                except Exception:
+                    pass
+            else:
+                page.add_init_script(script=_STEALTH_JS)
+
+            page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+            try:
+                page.goto(url, timeout=timeout_ms, wait_until="commit")
+            except Exception:
+                browser.close()
+                return None
+
+            # Wait for CF challenge to auto-resolve (up to 8 × 4s)
+            for _ in range(8):
+                try:
+                    title = page.title().lower()
+                except Exception:
+                    break
+                if any(m in title for m in ("just a moment", "checking your", "please wait")):
+                    page.wait_for_timeout(4000)
+                else:
+                    break
+
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+
+            try:
+                html = page.content()
+            except Exception:
+                html = None
+
+            browser.close()
+
+            if not html or len(html) < 2000:
+                return None
+            if _is_challenge(html):
+                return None
+            return html
+    except Exception as e:
+        print(f"  [PW] Error: {e}")
+        return None
+
+
 def _fetch_with_fallbacks(url: str) -> tuple[str | None, str]:
     """
-    Try fetching URL without proxy, then with each available proxy.
+    Multi-strategy fetch:
+      1. curl_cffi direct (fast, no proxy)
+      2. curl_cffi + proxy (fast, UK/US proxy)
+      3. Playwright + proxy (slower, ~30-60s; handles CF Turnstile challenges)
     Returns (html, strategy_label).
     """
-    # Direct (no proxy)
+    # Strategy 1: curl_cffi direct (no proxy)
     html = _fetch(url)
     if html:
         return html, "direct"
 
-    # Proxy pool (ordered: UK mobile first, then residential)
-    for proxy in _available_proxies()[:5]:
+    # Strategy 2: curl_cffi + proxy (UK mobile → US residential)
+    for proxy in _available_proxies()[:4]:
         html = _fetch(url, proxy=proxy)
         if html:
-            return html, f"proxy:{proxy.split('@')[-1]}"
+            return html, f"cffi+proxy:{proxy.split('@')[-1]}"
         _proxy_fail.add(proxy)
+
+    # Strategy 3: Playwright + proxy (handles CF Turnstile / JS challenges)
+    if _PW_OK:
+        best_proxy = _available_proxies()[0] if _available_proxies() else None
+        print(f"  → curl_cffi blocked — trying Playwright{' + proxy' if best_proxy else ''}…")
+        # Try with proxy first
+        if best_proxy:
+            html = _pw_fetch(url, proxy=best_proxy, timeout_ms=60000)
+            if html:
+                return html, f"playwright+proxy:{best_proxy.split('@')[-1]}"
+        # Try without proxy (some CF configs block proxy ranges but pass stealth browsers)
+        html = _pw_fetch(url, proxy=None, timeout_ms=45000)
+        if html:
+            return html, "playwright-direct"
 
     return None, "failed"
 
@@ -545,29 +688,39 @@ def extract_text_scan(html: str) -> dict:
 
 def npi_lookup_aspen(city: str, state: str, address_slug: str) -> list[str]:
     """
-    Query the NPI registry for dentists practicing at this Aspen Dental address.
+    Query the NPI registry for dentists at this Aspen Dental location.
 
-    Filters by:
-      - city + state (from URL path)
-      - street number extracted from the address slug
-      - at least one street word match
-
-    Example: slug "537-lincoln-street-ste-3" → number="537", words=["lincoln"]
-    NPI address "537 Lincoln St Ste 3" → matched.
+    Matching strategy (most-to-least strict, stops at first hit):
+      1. "aspen" in the NPI organisation name — most reliable
+      2. Street number + one street word both present in address
+      3. Street number only (catches abbreviated addresses)
+      4. If city has ≤5 dentists total, return all of them (small-town fallback)
     """
     if not city or not state:
         return []
 
-    # Parse slug for matching tokens
+    # Parse address tokens from slug
     slug_parts = address_slug.lower().replace("-", " ").split()
     street_num = slug_parts[0] if slug_parts and slug_parts[0].isdigit() else ""
-    _addr_noise = {"ste", "suite", "st", "ave", "blvd", "rd", "dr", "ln",
-                   "pkwy", "hwy", "n", "s", "e", "w", "floor", "fl"}
+    _noise = {"ste", "suite", "st", "ave", "blvd", "rd", "dr", "ln",
+              "pkwy", "hwy", "n", "s", "e", "w", "floor", "fl", "highway", "route"}
     street_words = [w for w in slug_parts[1:]
-                    if w not in _addr_noise and not w.isdigit() and len(w) > 2]
+                    if w not in _noise and not w.isdigit() and len(w) > 3]
+
+    def _build_name(item: dict) -> str | None:
+        basic  = item.get("basic", {})
+        first  = basic.get("first_name", "").strip()
+        last   = basic.get("last_name",  "").strip()
+        cred   = basic.get("credential", "").strip()
+        status = basic.get("status", "").upper()
+        if status == "D" or not first or not last:
+            return None
+        name = f"Dr. {first.title()} {last.title()}"
+        if cred:
+            name = f"{name}, {cred}"
+        return name if _validate_doctor_name(name) else None
 
     try:
-        # Fetch all dentists in the city (NPI has no per-address filter)
         params = {
             "version": "2.1",
             "enumeration_type": "NPI-1",
@@ -581,51 +734,76 @@ def npi_lookup_aspen(city: str, state: str, address_slug: str) -> list[str]:
         if r.status_code != 200:
             return []
         results = r.json().get("results", [])
+        total_in_city = len(results)
 
-        doctors: list = []
         seen: set = set()
 
+        def _add(name):
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+
+        # ── Pass 1: "aspen" in NPI org name ──────────────────────────────────
+        aspen_matches = []
         for item in results:
-            basic  = item.get("basic", {})
-            first  = basic.get("first_name", "").strip()
-            last   = basic.get("last_name",  "").strip()
-            cred   = basic.get("credential", "").strip()
-            status = basic.get("status", "").upper()
-            if status == "D":    # deactivated / deceased
-                continue
-            if not first or not last:
-                continue
-
-            # Address matching — at least street number + one street word
-            matched = False
             for addr in item.get("addresses", []):
-                a1 = addr.get("address_1", "").lower()
-                org = addr.get("organization_name", "").lower()
-
-                # Check for "aspen" in org name (most reliable)
-                if "aspen" in org:
-                    matched = True
+                if "aspen" in addr.get("organization_name", "").lower():
+                    n = _build_name(item)
+                    if n:
+                        aspen_matches.append(n)
+                        _add(n)
                     break
+        if aspen_matches:
+            print(f"  [NPI] Aspen org-name match: {len(aspen_matches)} doctor(s)")
+            return aspen_matches
 
-                # Street-number + word match
-                num_ok = street_num and street_num in a1.split()
-                word_ok = any(w in a1 for w in street_words[:2])
-                if num_ok and word_ok:
-                    matched = True
-                    break
+        # ── Pass 2: street number + street word ───────────────────────────────
+        addr_matches = []
+        if street_num:
+            for item in results:
+                for addr in item.get("addresses", []):
+                    a1 = addr.get("address_1", "").lower()
+                    num_ok  = street_num in a1.split()
+                    word_ok = any(w in a1 for w in street_words[:2])
+                    if num_ok and word_ok:
+                        n = _build_name(item)
+                        if n and n.lower() not in seen:
+                            addr_matches.append(n)
+                            _add(n)
+                        break
+        if addr_matches:
+            print(f"  [NPI] Street num+word match: {len(addr_matches)} doctor(s)")
+            return addr_matches
 
-            if not matched:
-                continue
+        # ── Pass 3: street number only ────────────────────────────────────────
+        num_only_matches = []
+        if street_num:
+            for item in results:
+                for addr in item.get("addresses", []):
+                    a1 = addr.get("address_1", "").lower()
+                    if street_num in a1.split():
+                        n = _build_name(item)
+                        if n and n.lower() not in seen:
+                            num_only_matches.append(n)
+                            _add(n)
+                        break
+        if num_only_matches:
+            print(f"  [NPI] Street-number-only match: {len(num_only_matches)} doctor(s)")
+            return num_only_matches
 
-            name = f"Dr. {first.title()} {last.title()}"
-            if cred:
-                name = f"{name}, {cred}"
-            key = name.lower()
-            if key not in seen and _validate_doctor_name(name):
-                doctors.append(name)
-                seen.add(key)
+        # ── Pass 4: small city fallback (≤5 total dentists) ───────────────────
+        if total_in_city <= 5:
+            small_city = []
+            for item in results:
+                n = _build_name(item)
+                if n and n.lower() not in seen:
+                    small_city.append(n)
+                    _add(n)
+            if small_city:
+                print(f"  [NPI] Small-city fallback ({total_in_city} dentists): {len(small_city)}")
+                return small_city
 
-        return doctors
+        print(f"  [NPI] No match found ({total_in_city} dentists in {city}, {state})")
+        return []
 
     except Exception as e:
         print(f"  [NPI] Error: {e}")
