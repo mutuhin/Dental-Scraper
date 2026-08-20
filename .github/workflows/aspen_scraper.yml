@@ -17,7 +17,7 @@ on:
 jobs:
   scrape_aspen:
     runs-on: ubuntu-latest
-    timeout-minutes: 240   # 4 hours — Playwright fallback adds ~60s/blocked site; handles 100+ locations
+    timeout-minutes: 30    # No Playwright; pure curl_cffi + NPI — 14 sites finishes in ~5 min
 
     steps:
       - name: Checkout code
@@ -31,11 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml openpyxl curl-cffi \
-                      playwright playwright-stealth
-
-      - name: Install Playwright browsers
-        run: playwright install chromium --with-deps
+          pip install requests beautifulsoup4 lxml openpyxl curl-cffi
 
       - name: Write proxies file
         env:

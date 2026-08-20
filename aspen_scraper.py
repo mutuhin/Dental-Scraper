@@ -142,7 +142,7 @@ def _is_challenge(html: str) -> bool:
     return any(m in snippet for m in _CHALLENGE_MARKERS)
 
 
-def _fetch(url: str, proxy: str = None, timeout: int = 25) -> str | None:
+def _fetch(url: str, proxy: str = None, timeout: int = 12) -> str | None:
     """Fetch URL via curl_cffi, optionally through a proxy. Returns HTML or None."""
     if not _CFFI_OK:
         try:
@@ -284,10 +284,13 @@ def _pw_fetch(url: str, proxy: str = None, timeout_ms: int = 60000) -> str | Non
 
 def _fetch_with_fallbacks(url: str) -> tuple[str | None, str]:
     """
-    Multi-strategy fetch:
+    Multi-strategy fetch for Aspen Dental pages.
       1. curl_cffi direct (fast, no proxy)
-      2. curl_cffi + proxy (fast, UK/US proxy)
-      3. Playwright + proxy (slower, ~30-60s; handles CF Turnstile challenges)
+      2. curl_cffi + each proxy (UK mobile → DE mobile → US residential)
+
+    Aspen Dental uses CF Enterprise — Playwright does NOT bypass it and
+    consumes enormous RAM launching Chrome per site. NPI registry handles
+    doctor/phone/address data instead, so Playwright is skipped entirely.
     Returns (html, strategy_label).
     """
     # Strategy 1: curl_cffi direct (no proxy)
@@ -301,20 +304,6 @@ def _fetch_with_fallbacks(url: str) -> tuple[str | None, str]:
         if html:
             return html, f"cffi+proxy:{proxy.split('@')[-1]}"
         _proxy_fail.add(proxy)
-
-    # Strategy 3: Playwright + proxy (handles CF Turnstile / JS challenges)
-    if _PW_OK:
-        best_proxy = _available_proxies()[0] if _available_proxies() else None
-        print(f"  → curl_cffi blocked — trying Playwright{' + proxy' if best_proxy else ''}…")
-        # Try with proxy first
-        if best_proxy:
-            html = _pw_fetch(url, proxy=best_proxy, timeout_ms=60000)
-            if html:
-                return html, f"playwright+proxy:{best_proxy.split('@')[-1]}"
-        # Try without proxy (some CF configs block proxy ranges but pass stealth browsers)
-        html = _pw_fetch(url, proxy=None, timeout_ms=45000)
-        if html:
-            return html, "playwright-direct"
 
     return None, "failed"
 
