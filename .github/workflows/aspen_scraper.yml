@@ -17,7 +17,7 @@ on:
 jobs:
   scrape_aspen:
     runs-on: ubuntu-latest
-    timeout-minutes: 60    # curl_cffi + NPI; CF Enterprise hangs connections so ~2 min/site max
+    timeout-minutes: 90    # plain+proxy strategy can take ~30-40s per site; 14 sites ≈ 30 min
 
     steps:
       - name: Checkout code

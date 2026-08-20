@@ -300,10 +300,15 @@ def _plain_session() -> std_requests.Session:
     return _PLAIN_SESSION
 
 
-def _fetch_plain(url: str, timeout: int = 8) -> str | None:
-    """Plain requests.get — fastest; works when CF allows standard browsers."""
+def _fetch_plain(url: str, proxy: str = None, timeout: int = 20) -> str | None:
+    """
+    Plain requests.get (optionally through proxy).
+    CF Enterprise blocks GitHub Actions datacenter IPs but allows residential proxies.
+    Longer timeout than cffi because residential proxies can be slower.
+    """
     try:
-        r = _plain_session().get(url, timeout=timeout, allow_redirects=True)
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        r = _plain_session().get(url, timeout=timeout, allow_redirects=True, proxies=proxies)
         if r.status_code == 200 and not _is_challenge(r.text) and len(r.text) > 1000:
             return r.text
     except Exception:
@@ -314,25 +319,34 @@ def _fetch_plain(url: str, timeout: int = 8) -> str | None:
 def _fetch_with_fallbacks(url: str) -> tuple[str | None, str]:
     """
     Multi-strategy fetch for Aspen Dental pages.
-      1. Plain requests (fast, simple — works when CF allows standard browsers)
-      2. curl_cffi direct (TLS fingerprint bypass)
-      3. curl_cffi + each proxy (UK mobile → DE mobile → US residential)
+      1. Plain requests direct (works on residential IPs; fails on datacenter IPs)
+      2. Plain requests + residential proxy (CF Enterprise blocks datacenter IPs,
+         not residential — this is the key strategy for GitHub Actions)
+      3. curl_cffi direct (TLS fingerprint bypass, no proxy)
+      4. curl_cffi + proxy (combined TLS bypass + residential IP)
 
-    Playwright is excluded — CF Enterprise blocks it and it OOMs the runner.
-    NPI registry supplements doctor/phone/address for fully blocked pages.
+    Playwright is excluded — CF Enterprise blocks it and OOMs the runner.
+    NPI registry supplements doctor/phone/address for any still-blocked pages.
     Returns (html, strategy_label).
     """
-    # Strategy 1: plain requests (no TLS tricks — sometimes enough)
+    # Strategy 1: plain requests direct
     html = _fetch_plain(url)
     if html:
-        return html, "plain-requests"
+        return html, "plain-direct"
 
-    # Strategy 2: curl_cffi direct (TLS fingerprint bypass, no proxy)
+    # Strategy 2: plain requests + residential proxy
+    # CF Enterprise allows residential IPs; GitHub Actions uses blocked datacenter IPs
+    for proxy in _available_proxies()[:3]:
+        html = _fetch_plain(url, proxy=proxy, timeout=25)
+        if html:
+            return html, f"plain+proxy:{proxy.split('@')[-1]}"
+
+    # Strategy 3: curl_cffi direct (TLS fingerprint bypass, no proxy)
     html = _fetch(url)
     if html:
         return html, "cffi-direct"
 
-    # Strategy 3: curl_cffi + proxy (UK mobile → US residential)
+    # Strategy 4: curl_cffi + proxy
     for proxy in _available_proxies()[:4]:
         html = _fetch(url, proxy=proxy)
         if html:
@@ -831,6 +845,40 @@ def _npi_fetch_all(city: str, state: str, max_pages: int = 5) -> list[dict]:
     return all_results
 
 
+def _npi_org_search(city: str, state: str, org_keyword: str = "aspen") -> list[dict]:
+    """
+    Search NPI for individual providers whose PRACTICE has org_keyword in the name.
+    Much faster than scanning all dentists in a city — returns only Aspen practitioners.
+    """
+    results = []
+    skip = 0
+    for _ in range(3):  # up to 600 results (very unlikely to need more)
+        params = {
+            "version": "2.1",
+            "enumeration_type": "NPI-1",
+            "city": city,
+            "state": state,
+            "organization_name": org_keyword,
+            "taxonomy_description": "dentist",
+            "limit": "200",
+            "skip": str(skip),
+        }
+        url = "https://npiregistry.cms.hhs.gov/api/?" + urllib.parse.urlencode(params)
+        try:
+            r = std_requests.get(url, timeout=10)
+            if r.status_code != 200:
+                break
+            page = r.json().get("results", [])
+            results.extend(page)
+            if len(page) < 200:
+                break
+            skip += 200
+            time.sleep(0.2)
+        except Exception:
+            break
+    return results
+
+
 def npi_lookup_aspen(city: str, state: str, address_slug: str) -> dict:
     """
     Query NPI for dentists at this Aspen Dental location.
@@ -840,12 +888,11 @@ def npi_lookup_aspen(city: str, state: str, address_slug: str) -> dict:
                             'address' (str or "").
 
     Matching strategy (most-to-least strict):
-      1. "aspen" in NPI org name — most reliable signal
-      2. Street number + one meaningful street word
-      3. Street number only
-      4. Small-city fallback: ≤15 dentists total → return all
-    Paginates through all NPI results so large cities don't miss matches.
-    Also returns phone / zip from the matching NPI location address record.
+      Pass 0: NPI organization_name=aspen search (fast, city-size-independent)
+      Pass 1: full city scan — "aspen" in NPI org name
+      Pass 2: street number + one meaningful street word
+      Pass 3: street number only
+      Pass 4: small-city fallback: ≤15 dentists total → return all
     """
     empty = {"doctors": [], "phone": "", "zip": "", "address": ""}
     if not city or not state:
@@ -906,6 +953,29 @@ def npi_lookup_aspen(city: str, state: str, address_slug: str) -> dict:
         return False  # pass 4 handled separately
 
     try:
+        # Pass 0: org-name search — fast, works regardless of city size
+        print(f"  [NPI] Pass 0: org search 'aspen' in {city}, {state}…")
+        org_results = _npi_org_search(city, state, "aspen")
+        if org_results:
+            doctors, phone, zip_, address = [], "", "", ""
+            seen_lc: set = set()
+            for item in org_results:
+                n = _build_name(item)
+                if n and n.lower() not in seen_lc:
+                    loc = _location_addr(item)
+                    doctors.append(n)
+                    seen_lc.add(n.lower())
+                    if not phone and loc["phone"]:
+                        phone = loc["phone"]
+                    if not zip_ and loc["zip"]:
+                        zip_ = loc["zip"]
+                    if not address and loc["address"]:
+                        address = loc["address"]
+            if doctors:
+                print(f"  [NPI] Pass 0 match: {len(doctors)} doctor(s)")
+                return {"doctors": doctors, "phone": phone, "zip": zip_, "address": address}
+
+        # Pass 0 got results but none passed validation — fall through to full scan
         print(f"  [NPI] Fetching dentists in {city}, {state}…")
         results = _npi_fetch_all(city, state)
         total = len(results)
