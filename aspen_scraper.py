@@ -39,7 +39,7 @@ import sys
 import time
 import random
 import urllib.parse
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -282,23 +282,57 @@ def _pw_fetch(url: str, proxy: str = None, timeout_ms: int = 60000) -> str | Non
         return None
 
 
+_PLAIN_SESSION: std_requests.Session | None = None
+
+def _plain_session() -> std_requests.Session:
+    global _PLAIN_SESSION
+    if _PLAIN_SESSION is None:
+        _PLAIN_SESSION = std_requests.Session()
+        _PLAIN_SESSION.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        })
+    return _PLAIN_SESSION
+
+
+def _fetch_plain(url: str, timeout: int = 15) -> str | None:
+    """Plain requests.get — fastest; works when CF allows standard browsers."""
+    try:
+        r = _plain_session().get(url, timeout=timeout, allow_redirects=True)
+        if r.status_code == 200 and not _is_challenge(r.text) and len(r.text) > 1000:
+            return r.text
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_with_fallbacks(url: str) -> tuple[str | None, str]:
     """
     Multi-strategy fetch for Aspen Dental pages.
-      1. curl_cffi direct (fast, no proxy)
-      2. curl_cffi + each proxy (UK mobile → DE mobile → US residential)
+      1. Plain requests (fast, simple — works when CF allows standard browsers)
+      2. curl_cffi direct (TLS fingerprint bypass)
+      3. curl_cffi + each proxy (UK mobile → DE mobile → US residential)
 
-    Aspen Dental uses CF Enterprise — Playwright does NOT bypass it and
-    consumes enormous RAM launching Chrome per site. NPI registry handles
-    doctor/phone/address data instead, so Playwright is skipped entirely.
+    Playwright is excluded — CF Enterprise blocks it and it OOMs the runner.
+    NPI registry supplements doctor/phone/address for fully blocked pages.
     Returns (html, strategy_label).
     """
-    # Strategy 1: curl_cffi direct (no proxy)
+    # Strategy 1: plain requests (no TLS tricks — sometimes enough)
+    html = _fetch_plain(url)
+    if html:
+        return html, "plain-requests"
+
+    # Strategy 2: curl_cffi direct (TLS fingerprint bypass, no proxy)
     html = _fetch(url)
     if html:
-        return html, "direct"
+        return html, "cffi-direct"
 
-    # Strategy 2: curl_cffi + proxy (UK mobile → US residential)
+    # Strategy 3: curl_cffi + proxy (UK mobile → US residential)
     for proxy in _available_proxies()[:4]:
         html = _fetch(url, proxy=proxy)
         if html:
@@ -306,6 +340,57 @@ def _fetch_with_fallbacks(url: str) -> tuple[str | None, str]:
         _proxy_fail.add(proxy)
 
     return None, "failed"
+
+
+def _discover_provider_urls(html: str, base_url: str) -> list[str]:
+    """Find all /providers/ sub-page URLs linked from this page."""
+    return sorted({
+        urljoin(base_url, href).split("?")[0].rstrip("/")
+        for href in re.findall(r'href=["\']([^"\']+)["\']', html, re.I)
+        if "/providers/" in href and "aspendental.com" in urljoin(base_url, href)
+    })
+
+
+def _extract_doctor_from_provider_page(html: str) -> str:
+    """Pull a doctor name from an Aspen /providers/ profile page."""
+    text = re.sub(r"\s+", " ", BeautifulSoup(html, "html.parser").get_text(" "))
+    for pattern in (
+        r"Dr\.\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
+        r"About\s+Dr\.\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
+    ):
+        m = re.search(pattern, text)
+        if m:
+            name = re.sub(r"\s+", " ", m.group(1)).strip()
+            if 2 <= len(name.split()) <= 5:
+                return name
+    return ""
+
+
+def _scrape_provider_pages(html: str, base_url: str) -> list[str]:
+    """
+    Discover /providers/ sub-pages linked from html, fetch each one,
+    and return a list of doctor names found.
+    """
+    provider_urls = _discover_provider_urls(html, base_url)
+    if not provider_urls:
+        return []
+
+    names = []
+    seen_lc: set[str] = set()
+    for purl in provider_urls[:12]:  # cap at 12 profiles
+        try:
+            phtml = _fetch_plain(purl) or _fetch(purl)
+            if not phtml:
+                continue
+            name = _extract_doctor_from_provider_page(phtml)
+            if name and name.lower() not in seen_lc:
+                seen_lc.add(name.lower())
+                names.append(name)
+                print(f"    → provider page doctor: {name}")
+            time.sleep(0.5)
+        except Exception:
+            continue
+    return names
 
 
 # ── URL parsing ───────────────────────────────────────────────────────────────
@@ -974,6 +1059,27 @@ def scrape_aspen_location(url: str) -> dict:
             pm = re.search(r'\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}', html)
             if pm:
                 result["phone"] = pm.group(0).strip()
+
+        # Step 1f: crawl /providers/ sub-pages for individual doctor profiles
+        print(f"  → Scanning /providers/ sub-pages…")
+        provider_names = _scrape_provider_pages(html, clean_url)
+        if provider_names:
+            existing_lc = set()
+            if result.get("scraped_doctor_names") not in ("Not Found", "", None):
+                existing_lc = {n.strip().lower()
+                               for n in result["scraped_doctor_names"].split(",")}
+            new_pnames = [n for n in provider_names if n.lower() not in existing_lc]
+            if result.get("scraped_doctor_names") in ("Not Found", "", None):
+                result["scraped_doctor_names"] = ", ".join(provider_names)
+                result["doctors"] = [{"name": n, "specialty": "Not Found", "associations": ""}
+                                     for n in provider_names]
+                print(f"  ✓ Provider pages doctors: {result['scraped_doctor_names']}")
+            elif new_pnames:
+                result["scraped_doctor_names"] += ", " + ", ".join(new_pnames)
+                result["doctors"].extend(
+                    [{"name": n, "specialty": "Not Found", "associations": ""} for n in new_pnames]
+                )
+                print(f"  ✓ Provider pages added {len(new_pnames)}: {', '.join(new_pnames)}")
     else:
         print(f"  ✗ Page blocked (CF Enterprise) — using NPI + URL-derived address")
         result["skip_reason"] = "CF / Bot Protected — NPI used for doctors"
