@@ -142,7 +142,7 @@ def _is_challenge(html: str) -> bool:
     return any(m in snippet for m in _CHALLENGE_MARKERS)
 
 
-def _fetch(url: str, proxy: str = None, timeout: int = 12) -> str | None:
+def _fetch(url: str, proxy: str = None, timeout: int = 8) -> str | None:
     """Fetch URL via curl_cffi, optionally through a proxy. Returns HTML or None."""
     if not _CFFI_OK:
         try:
@@ -300,7 +300,7 @@ def _plain_session() -> std_requests.Session:
     return _PLAIN_SESSION
 
 
-def _fetch_plain(url: str, timeout: int = 15) -> str | None:
+def _fetch_plain(url: str, timeout: int = 8) -> str | None:
     """Plain requests.get — fastest; works when CF allows standard browsers."""
     try:
         r = _plain_session().get(url, timeout=timeout, allow_redirects=True)
@@ -796,14 +796,15 @@ def extract_text_scan(html: str) -> dict:
 
 # ── NPI registry ──────────────────────────────────────────────────────────────
 
-def _npi_fetch_all(city: str, state: str) -> list[dict]:
+def _npi_fetch_all(city: str, state: str, max_pages: int = 5) -> list[dict]:
     """
-    Fetch ALL NPI-1 dentist records for a city/state, paginating through results.
-    NPI caps each page at 200; we paginate until we have everything.
+    Fetch NPI-1 dentist records for a city/state, paginating up to max_pages.
+    NPI caps each page at 200; cap at 1000 total to avoid spending 3+ min on
+    large cities (Worcester, El Paso) where Aspen is never going to be #800.
     """
     all_results = []
     skip = 0
-    while True:
+    for _ in range(max_pages):
         params = {
             "version": "2.1",
             "enumeration_type": "NPI-1",
@@ -815,7 +816,7 @@ def _npi_fetch_all(city: str, state: str) -> list[dict]:
         }
         url = "https://npiregistry.cms.hhs.gov/api/?" + urllib.parse.urlencode(params)
         try:
-            r = std_requests.get(url, timeout=15)
+            r = std_requests.get(url, timeout=10)
             if r.status_code != 200:
                 break
             data = r.json()
@@ -824,7 +825,7 @@ def _npi_fetch_all(city: str, state: str) -> list[dict]:
             if len(page) < 200:
                 break   # last page
             skip += 200
-            time.sleep(0.3)  # be polite to the NPI API
+            time.sleep(0.2)
         except Exception:
             break
     return all_results
@@ -1217,6 +1218,7 @@ def main():
 
     all_results: list = []
     for i, url in enumerate(urls, 1):
+        _proxy_fail.clear()  # reset per-site so later sites still get proxy attempts
         info = _parse_aspen_url(url)
         label = f"{info['city']}, {info['state']}" if info["city"] else url[:60]
         print(f"[{i}/{len(urls)}] {label}")
@@ -1242,7 +1244,7 @@ def main():
             print(f"  ✓ Checkpoint saved ({i}/{len(urls)})")
 
         if i < len(urls):
-            time.sleep(random.uniform(1, 2.5))
+            time.sleep(0.5)
 
     print(f"\nDone. {len(all_results)} locations scraped → {args.output}")
 

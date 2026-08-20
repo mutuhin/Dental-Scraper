@@ -17,7 +17,7 @@ on:
 jobs:
   scrape_aspen:
     runs-on: ubuntu-latest
-    timeout-minutes: 30    # No Playwright; pure curl_cffi + NPI — 14 sites finishes in ~5 min
+    timeout-minutes: 60    # curl_cffi + NPI; CF Enterprise hangs connections so ~2 min/site max
 
     steps:
       - name: Checkout code
