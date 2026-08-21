@@ -1213,6 +1213,10 @@ _SKIP_WORDS = (
     "directions", "meet", "learn", "blog", "menu", "home",
     "today", "read", "more", "view", "skip", "once",
     "providing", "providing", "hills", "beverly",
+    # SVG / carousel icon labels
+    "left arrow", "right arrow", "chevron left", "chevron right",
+    "arrow left", "arrow right", "prev arrow", "next arrow",
+    "slide left", "slide right", "scroll left", "scroll right",
 )
 
 # Words that are never valid as a name component (last name / first name)
@@ -1280,6 +1284,9 @@ _INVALID_NAME_WORDS = frozenset({
     "affordable", "local", "premier", "modern",
     # placeholder / UI text that appears in "team" sections before real content
     "coming", "soon", "stars", "star", "up", "down",
+    # SVG / carousel icon labels — aria-label or alt text captured as names
+    "arrow", "chevron", "prev", "next", "previous", "slide", "scroll",
+    "hamburger", "icon", "button", "carousel",
     # form validation / UI error text — prevents "Invalid Email Address" etc.
     "invalid", "email", "address", "required", "error", "field", "enter",
     "valid", "please", "submit", "form", "input", "confirm", "password",
@@ -1298,6 +1305,11 @@ _PLACEHOLDER_PHRASES = frozenset({
     "patient reviews", "google reviews", "yelp reviews",
     "pediatric dentist", "general dentist", "family dentist",
     "cosmetic dentist", "emergency dentist", "sedation dentist",
+    # SVG / carousel icon aria-labels captured as names
+    "left arrow", "right arrow", "chevron left", "chevron right",
+    "arrow left", "arrow right", "prev", "next", "previous",
+    "slide left", "slide right", "scroll left", "scroll right",
+    "close", "open menu", "hamburger", "search icon",
 })
 
 # Roman numerals and common suffixes that ARE valid all-uppercase name words
