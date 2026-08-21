@@ -13,6 +13,11 @@ on:
           Example: https://site1.com, https://site2.com
         required: true
         default: ""
+      artifact_name:
+        description: >
+          Name for the output artifact (e.g. 4001-4100). Defaults to url-scrape-output.
+        required: false
+        default: "url-scrape-output"
 
 jobs:
   scrape_urls:
@@ -92,7 +97,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: url-scrape-output
+          name: ${{ inputs.artifact_name || 'url-scrape-output' }}
           path: url_scrape_output.xlsx
           retention-days: 30
           overwrite: true
