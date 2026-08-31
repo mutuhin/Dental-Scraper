@@ -1996,7 +1996,8 @@ def _parse_team_page_for_doctors(soup):
 
                 bio_text = candidate.lower()
 
-            # ── Specialty hint: short subtitle line immediately after heading ──
+            # ── Specialty hint: subtitle line adjacent to heading ────────────
+            # Many sites place the role AFTER the name; some place it BEFORE.
             _spec_hint = ""
             for _sh_sib in heading.next_siblings:
                 if not hasattr(_sh_sib, 'get_text'):
@@ -2011,6 +2012,21 @@ def _parse_team_page_for_doctors(soup):
                     break
                 if len(_sh_text) > 200:
                     break
+            if not _spec_hint:
+                # Role placed ABOVE the heading — check preceding siblings in reverse
+                for _sh_sib in heading.previous_siblings:
+                    if not hasattr(_sh_sib, 'get_text'):
+                        continue
+                    _sh_text = _sh_sib.get_text(separator=" ", strip=True)
+                    if not _sh_text or len(_sh_text) < 5:
+                        continue
+                    if (len(_sh_text) <= 90 and _SPEC_HINT_RE.search(_sh_text)
+                            and not _SPEC_HINT_REJECT_RE.search(_sh_text)
+                            and not _SPEC_HINT_HAS_NAME_CRED_RE.search(_sh_text)):
+                        _spec_hint = _sh_text
+                        break
+                    if len(_sh_text) > 200:
+                        break
             doctors.append({"name": name, "text": bio_text, "bio_url": bio_url,
                             "specialty_hint": _spec_hint})
             break
@@ -3395,7 +3411,7 @@ def _is_valid_social_profile_url(platform: str, url: str) -> bool:
 
 
 def find_social_links(soup):
-    """Extract social media URLs from anchor tags."""
+    """Extract social media URLs from anchor tags and data attributes."""
     found = {p: "" for p in SOCIAL_PLATFORMS}
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
@@ -3407,6 +3423,21 @@ def find_social_links(soup):
                 if platform == "linkedin" and _is_corp_linkedin(raw_href):
                     continue
                 found[platform] = raw_href
+    # data-href / data-url / data-link — catches FB Page Plugin widgets and
+    # share buttons that use JS handlers instead of plain <a href> links.
+    for tag in soup.find_all(True):
+        for attr in ("data-href", "data-url", "data-link"):
+            val = tag.get(attr, "")
+            if not val:
+                continue
+            val_lower = val.lower()
+            for platform in SOCIAL_PLATFORMS:
+                if platform + ".com" in val_lower and not found[platform]:
+                    if not _is_valid_social_profile_url(platform, val):
+                        continue
+                    if platform == "linkedin" and _is_corp_linkedin(val):
+                        continue
+                    found[platform] = val
     return found
 
 
@@ -3465,10 +3496,17 @@ def find_social_links_regex(html):
     """
     found = {p: "" for p in SOCIAL_PLATFORMS}
     for platform in SOCIAL_PLATFORMS:
-        pattern = (
-            rf'https?://(?:www\.)?{re.escape(platform)}\.com'
-            rf'/[A-Za-z0-9._\-/@%]+'
-        )
+        if platform == "facebook":
+            # Also match m.facebook.com and mbasic.facebook.com (mobile / plain-text variants)
+            pattern = (
+                r'https?://(?:www\.|m\.|mbasic\.)?facebook\.com'
+                r'/[A-Za-z0-9._\-/@%]+'
+            )
+        else:
+            pattern = (
+                rf'https?://(?:www\.)?{re.escape(platform)}\.com'
+                rf'/[A-Za-z0-9._\-/@%]+'
+            )
         for m in re.findall(pattern, html, re.IGNORECASE):
             clean = m.split("?")[0].rstrip("/")
             if any(s in clean.lower() for s in _SOCIAL_URL_SKIP):
@@ -3771,6 +3809,8 @@ def _parse_fb_followers(html_or_text: str) -> str:
     # ── 1. JSON/script-embedded numeric patterns (most reliable) ──────────────
     for pat in (
         r'"followers_count"\s*:\s*(\d+)',
+        r'"follower_count"\s*:\s*(\d+)',   # singular form in Relay store
+        r'"fans_count"\s*:\s*(\d+)',        # alias used in some FB API responses
         r'"fan_count"\s*:\s*(\d+)',
         r'"subscriber_count"\s*:\s*(\d+)',
         r'"like_count"\s*:\s*(\d+)',
