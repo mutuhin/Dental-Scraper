@@ -541,12 +541,12 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
         # the connection open waiting for the JS challenge to run, causing a
         # full 30-45 s timeout even though the server IS responding.
         try:
-            page.goto(url, timeout=15000, wait_until="commit")
+            page.goto(url, timeout=25000, wait_until="commit")
         except Exception:
             # Even "commit" timed out — server is completely unreachable/hung
             return None
-        # Wait for Cloudflare JS challenge to auto-resolve (up to 8 × 5s = 40s)
-        for _ in range(8):
+        # Wait for Cloudflare JS challenge to auto-resolve (up to 12 × 5s = 60s)
+        for _ in range(12):
             try:
                 title = page.title().lower()
             except Exception:
@@ -557,14 +557,14 @@ def _pw_get_html(url, proxy_url=None, pw_context=None):
                 break
         # After CF resolves (or no CF), wait for JS to render page content.
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
         except Exception:
             pass
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
+            page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass   # fine if it times out
-        page.wait_for_timeout(3000)   # extra grace for React/SPA hydration
+        page.wait_for_timeout(6000)   # extra grace for React/SPA hydration
         try:
             html = ds._safe_content(page, timeout_secs=20)
         except Exception:
