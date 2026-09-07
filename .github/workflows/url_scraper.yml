@@ -54,16 +54,21 @@ jobs:
           if [[ "$BASE" != customer-* ]]; then
             BASE="customer-${BASE}"
           fi
-          # Mobile proxies (real 4G/5G IPs) — virtually impossible to block.
-          # Put UK mobile first — Aspen Dental allows UK traffic.
-          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@mobile.oxylabs.io:7777" > proxies.txt
+          # US residential mobile first — most dental sites are US-only and
+          # reject non-US IPs even through proxy.  Mobile (4G/5G) IPs are
+          # real carrier addresses that WAFs cannot reliably block.
+          echo "http://${BASE}-cc-us:${OXYLABS_PASS}@mobile.oxylabs.io:7777" > proxies.txt
+          # UK/DE mobile next (catches sites that geo-block US datacenter ranges)
+          echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@mobile.oxylabs.io:7777" >> proxies.txt
           echo "http://${BASE}-cc-de:${OXYLABS_PASS}@mobile.oxylabs.io:7777" >> proxies.txt
-          # Residential UK/DE as fallback (in case mobile isn't in subscription)
+          # US residential as fallback (in case mobile isn't in subscription)
+          echo "http://${BASE}-cc-us:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
+          # UK/DE residential fallback
           echo "http://${BASE}-cc-gb:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           echo "http://${BASE}-cc-de:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
           # Global rotating as last resort (customer- prefix required)
           echo "http://${BASE}:${OXYLABS_PASS}@pr.oxylabs.io:7777" >> proxies.txt
-          echo "Proxy file written (UK mobile first, credentials hidden)"
+          echo "Proxy file written (US mobile first, credentials hidden)"
 
       - name: Normalise URL list
         id: normalise
