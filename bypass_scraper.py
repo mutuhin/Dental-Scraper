@@ -1098,12 +1098,17 @@ def _is_empty_result(result):
     no_doc   = doc   in _EMPTY_VALS
     no_email = email in _EMPTY_VALS
     # Check key service columns — if all zero the page content wasn't captured
+    def _safe_int(v):
+        try:
+            return int(v or 0)
+        except (ValueError, TypeError):
+            return 0
     svc_total = (
-        int(result.get("implants",      0) or 0) +
-        int(result.get("veneers",       0) or 0) +
-        int(result.get("invisalign",    0) or 0) +
-        int(result.get("whitening",     0) or 0) +
-        int(result.get("sedation",      0) or 0)
+        _safe_int(result.get("implants",   0)) +
+        _safe_int(result.get("veneers",    0)) +
+        _safe_int(result.get("invisalign", 0)) +
+        _safe_int(result.get("whitening",  0)) +
+        _safe_int(result.get("sedation",   0))
     )
     return no_doc and no_email and svc_total == 0
 
@@ -1191,7 +1196,10 @@ def _fill_missing_data(result, html, label="direct"):
     # ── Service keyword counts ──────────────────────────────────────────────────
     text_lc = body_text.lower()
     for terms, field, cap in _DIRECT_SVC:
-        cur = int(result.get(field, 0) or 0)
+        try:
+            cur = int(result.get(field, 0) or 0)
+        except (ValueError, TypeError):
+            cur = 0
         if cur == 0:
             cnt = sum(text_lc.count(t) for t in terms)
             if cnt > 0:
