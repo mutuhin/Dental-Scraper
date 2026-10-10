@@ -29,7 +29,7 @@ import random
 import logging
 import warnings
 import shutil
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, quote as _url_quote
 
 import openpyxl
 from openpyxl import Workbook
@@ -73,10 +73,15 @@ _OXY_USER = (
     else f"customer-{_OXY_USER_RAW}"
 ) if _OXY_USER_RAW else ""
 _USE_PROXY = bool(_OXY_USER and _OXY_PASS)
-_PROXY_SERVER = "pr.oxylabs.io:7777"
+# Use mobile residential proxy (same IPs as url_scraper.yml uses).
+# US mobile 4G IPs are real carrier addresses — Google doesn't block them.
+# pr.oxylabs.io (datacenter rotating) triggers 407 CONNECT auth errors on
+# Google HTTPS because datacenter endpoints require a different CONNECT flow.
+_PROXY_SERVER    = "mobile.oxylabs.io:7777"
+_PROXY_SERVER_US = f"{_OXY_USER}-cc-us:{_OXY_PASS}@{_PROXY_SERVER}" if _USE_PROXY else ""
 _PW_PROXY = {
     "server":   f"http://{_PROXY_SERVER}",
-    "username": _OXY_USER,
+    "username": f"{_OXY_USER}-cc-us",
     "password": _OXY_PASS,
 } if _USE_PROXY else None
 
@@ -93,10 +98,17 @@ if IS_CI:
     _g._wait_captcha = _ci_captcha_noop
 
 # ── curl_cffi Google search (proxy-aware, no full browser needed) ─────────────
-_CFFI_PROXIES = {
-    "http":  f"http://{_OXY_USER}:{_OXY_PASS}@{_PROXY_SERVER}",
-    "https": f"http://{_OXY_USER}:{_OXY_PASS}@{_PROXY_SERVER}",
-} if _USE_PROXY else {}
+# URL-encode username and password so special characters (@ : # etc.) in the
+# Oxylabs password don't break the proxy URL.
+def _make_cffi_proxies(user: str, password: str, server: str) -> dict:
+    if not user or not password:
+        return {}
+    enc_user = _url_quote(f"{user}-cc-us", safe="")
+    enc_pass = _url_quote(password, safe="")
+    url = f"http://{enc_user}:{enc_pass}@{server}"
+    return {"http": url, "https": url}
+
+_CFFI_PROXIES = _make_cffi_proxies(_OXY_USER, _OXY_PASS, _PROXY_SERVER) if _USE_PROXY else {}
 
 
 def _cffi_fetch_rating(practice_name: str, city: str, state: str,
@@ -169,8 +181,8 @@ def _oxylabs_serp_rating(practice_name: str, city: str, state: str) -> tuple:
             json=payload,
             timeout=30,   # 30s max — 403 plan-not-included returns instantly
         )
-        if resp.status_code == 403:
-            log.warning("  Oxylabs SERP API: 403 Forbidden — plan may not include SERP Scraper API")
+        if resp.status_code in (401, 403):
+            log.warning(f"  Oxylabs SERP API: HTTP {resp.status_code} — plan may not include SERP Scraper API; skipping")
             return "", ""
         if resp.status_code != 200:
             log.info(f"  Oxylabs SERP API: HTTP {resp.status_code}")
@@ -407,6 +419,26 @@ def write_output(practices: dict, results: dict, source_file: str):
     log.info(f"  Saved → {OUTPUT_FILE}  ({patched} rows patched | {found}/{len(results)} rated)")
 
 
+# ── Practice name sanitization ────────────────────────────────────────────────
+_BAD_NAME_RE = re.compile(
+    r'^[A-Z]{2,3}\s*,\s*[A-Z]{2,4}$'   # "MD, HDC" / "IL, HDC"
+    r'|^[A-Z]{2,3}$'                     # bare state code
+    r'|^[\W\d]+$',                       # only symbols/digits
+    re.I,
+)
+
+def _search_name(p: dict) -> str:
+    """Return a usable search term for the practice: name if clean, else domain."""
+    name = p.get("practice", "").strip()
+    if not name or len(name) < 4 or _BAD_NAME_RE.search(name):
+        # Fall back to the domain root as a human-readable name
+        domain = p.get("domain", "") or ""
+        if domain:
+            return domain.split(".")[0].replace("-", " ").title()
+        return name
+    return name
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -452,12 +484,13 @@ def run():
                 continue
 
             rating, count = "", ""
+            sname = _search_name(p)
 
             # ── Method 1: Places API by name + address (most accurate) ──────────
             if GOOGLE_PLACES_API_KEY:
                 try:
                     rating, count = _g.places_by_name(
-                        p["practice"], p["city"], p["state"], p["zip"], p.get("address", "")
+                        sname, p["city"], p["state"], p["zip"], p.get("address", "")
                     )
                     if rating:
                         log.info(f"  ✓ Places/name: {rating} ★  ({count})")
@@ -468,7 +501,7 @@ def run():
             if not rating and GOOGLE_PLACES_API_KEY and p["domain"]:
                 try:
                     rating, count = _g.places_by_website(
-                        p["domain"], p["city"], p["state"], p["practice"]
+                        p["domain"], p["city"], p["state"], sname
                     )
                     if rating:
                         log.info(f"  ✓ Places/domain: {rating} ★  ({count})")
@@ -476,12 +509,12 @@ def run():
                     log.debug(f"  Places/domain error: {e}")
 
             # ── Method 3a: curl_cffi + Oxylabs proxy (CI, fast HTTP, no browser) ──
-            # Oxylabs DC IPs often get a non-knowledge-panel page — we log what
-            # we receive so failures are visible in the Actions log.
+            # Mobile residential proxy (mobile.oxylabs.io) avoids the 407
+            # CONNECT auth failures seen with datacenter pr.oxylabs.io.
             if not rating and IS_CI and _USE_PROXY:
                 try:
                     rating, count = _cffi_fetch_rating(
-                        p["practice"], p["city"], p["state"], p.get("address", "")
+                        sname, p["city"], p["state"], p.get("address", "")
                     )
                     if rating:
                         log.info(f"  ✓ curl_cffi/search: {rating} ★  ({count})")
@@ -489,13 +522,11 @@ def run():
                     log.info(f"  curl_cffi error: {e}")
 
             # ── Method 3b: Oxylabs SERP Scraper API (CI, handles CAPTCHAs) ───
-            # Uses Oxylabs' dedicated Google scraping endpoint — routes through
-            # residential IPs and renders JS server-side.  Same credentials as
-            # the proxy.  Falls back gracefully if plan doesn't include SERP API.
+            # Falls back gracefully if plan doesn't include SERP API (401/403).
             if not rating and IS_CI and _USE_PROXY:
                 try:
                     rating, count = _oxylabs_serp_rating(
-                        p["practice"], p["city"], p["state"]
+                        sname, p["city"], p["state"]
                     )
                     if rating:
                         log.info(f"  ✓ Oxylabs SERP: {rating} ★  ({count})")
@@ -506,7 +537,7 @@ def run():
             if not rating:
                 try:
                     rating, count = _g.search_google_by_name(
-                        p["practice"], p["city"], p["state"], pw_page
+                        sname, p["city"], p["state"], pw_page
                     )
                     if rating:
                         log.info(f"  ✓ Google/search: {rating} ★  ({count})")
@@ -517,7 +548,7 @@ def run():
             if not rating:
                 try:
                     rating, count = _g.search_maps_by_name(
-                        p["practice"], p["doctor"],
+                        sname, p["doctor"],
                         p["address"], p["city"], p["state"], p["zip"],
                         pw_page,
                     )

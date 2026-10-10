@@ -584,6 +584,54 @@ def search_maps_by_website(domain: str, practice_name: str,
         return "", ""
 
 
+def _pw_extract_review_count(pw_page) -> str:
+    """
+    Pull review count directly from the live DOM after a Google search page load.
+    Tries several selector patterns that cover Google's current knowledge panel layout.
+    Returns a digit string or "".
+    """
+    selectors = [
+        # "342 Google reviews" link in the knowledge panel
+        'a[href*="maps.google"][href*="reviews"]',
+        'a[data-async-trigger="reviewDialog"]',
+        'span[aria-label*="review"]',
+        # Older layout: "342 reviews" span inside the rating block
+        'span.hqzQac span',
+        'div.jdgxue span',
+        'span.z3HNkc',
+        # Generic: any visible element whose text ends with "reviews"
+    ]
+    for sel in selectors:
+        try:
+            els = pw_page.query_selector_all(sel)
+            for el in els:
+                txt = (el.inner_text() or "").strip()
+                m = re.search(r"([\d,]+)\s*(?:Google\s+)?reviews?", txt, re.I)
+                if m:
+                    return m.group(1).replace(",", "")
+                # aria-label fallback
+                lbl = el.get_attribute("aria-label") or ""
+                m = re.search(r"([\d,]+)\s*(?:Google\s+)?reviews?", lbl, re.I)
+                if m:
+                    return m.group(1).replace(",", "")
+        except Exception:
+            pass
+    # Last resort: scan all text nodes for "N reviews" pattern
+    try:
+        all_text = pw_page.evaluate("() => document.body.innerText")
+        m = re.search(r"([\d,]+)\s*Google\s+reviews?", all_text, re.I)
+        if m:
+            return m.group(1).replace(",", "")
+        m = re.search(r"([\d,]+)\s*reviews?", all_text, re.I)
+        if m:
+            val = int(m.group(1).replace(",", ""))
+            if val >= 2:   # skip "1 review" noise from review cards
+                return str(val)
+    except Exception:
+        pass
+    return ""
+
+
 def search_google_by_name(practice_name: str, city: str, state: str, pw_page) -> tuple:
     """Google Web search → knowledge panel rating (fast, no Maps needed)."""
     clean = re.sub(r'\b(LLC|PA|PLLC|DDS|DMD|Inc\.?|Corp\.?)\b', '', practice_name, flags=re.I).strip(', ')
@@ -599,7 +647,11 @@ def search_google_by_name(practice_name: str, city: str, state: str, pw_page) ->
         if _is_captcha(html):
             _wait_captcha(pw_page)
             html = pw_page.content()
-        return extract_rating(html)
+        rating, count = extract_rating(html)
+        # If rating found but count missing, try direct DOM extraction
+        if rating and not count:
+            count = _pw_extract_review_count(pw_page)
+        return rating, count
     except Exception as e:
         log.debug(f"  Google/search error: {e}")
         return "", ""
